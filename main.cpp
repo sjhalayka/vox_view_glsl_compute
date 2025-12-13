@@ -3,6 +3,7 @@
 
 // ============================================================================
 // GPU Compute Shader Implementation for Real-Time Voxel Grid Collision
+// with 3D Navier-Stokes Fluid Simulation
 // Uses OpenGL 4.3 Compute Shaders, GLEW, GLUT, GLM
 // ============================================================================
 
@@ -35,7 +36,64 @@ bool gpuInitialized = false;
 size_t numSurfacePoints = 0;
 
 // ============================================================================
-// Compute Shader Sources
+// FLUID SIMULATION - New Variables
+// ============================================================================
+
+// Fluid simulation parameters
+struct FluidParams {
+    float dt = 0.016f;              // Time step (~60 fps)
+    float viscosity = 0.0001f;      // Kinematic viscosity
+    float diffusion = 0.0001f;      // Density diffusion rate
+    int jacobiIterations = 40;      // Pressure solver iterations
+    float smagorinskyConst = 0.1f;  // Smagorinsky constant for LES turbulence
+    float densityAmount = 100.0f;   // Amount of density to inject
+    float velocityAmount = 1.0f;   // Amount of velocity to inject
+    float densityDissipation = 0.995f; // Density dissipation per frame
+    float velocityDissipation = 0.99f; // Velocity dissipation per frame
+};
+
+FluidParams fluidParams;
+bool fluidSimEnabled = true;
+bool fluidInitialized = false;
+
+// Fluid SSBOs
+GLuint velocitySSBO[2] = { 0, 0 };      // Double buffered velocity (vec4: vx, vy, vz, 0)
+GLuint densitySSBO[2] = { 0, 0 };       // Double buffered density
+GLuint pressureSSBO[2] = { 0, 0 };      // Double buffered pressure
+GLuint divergenceSSBO = 0;             // Divergence field
+GLuint obstacleSSBO = 0;               // Obstacle mask (1 = obstacle, 0 = fluid)
+GLuint turbulentViscositySSBO = 0;     // Smagorinsky turbulent viscosity
+
+// Fluid compute shader programs
+GLuint advectionProgram = 0;
+GLuint diffusionProgram = 0;
+GLuint divergenceProgram = 0;
+GLuint pressureProgram = 0;
+GLuint gradientSubtractProgram = 0;
+GLuint boundaryProgram = 0;
+GLuint addSourceProgram = 0;
+GLuint turbulenceProgram = 0;
+GLuint obstacleProgram = 0;
+GLuint visualizeProgram = 0;
+
+int currentBuffer = 0;  // For double buffering
+
+// Mouse interaction
+bool injectDensity = false;
+bool injectVelocity = false;
+glm::vec3 lastMouseWorldPos(0.0f);
+glm::vec3 currentMouseWorldPos(0.0f);
+glm::vec3 mouseVelocity(0.0f);
+int injectRadius = 3;
+
+// Fluid visualization
+GLuint fluidVAO = 0, fluidVBO = 0;
+GLuint fluidRenderProgram = 0;
+size_t numFluidPoints = 0;
+float densityThreshold = 0.01f;
+
+// ============================================================================
+// Compute Shader Sources - Original
 // ============================================================================
 
 const char* backgroundPointsComputeShader = R"(
@@ -209,6 +267,733 @@ void main() {
 }
 )";
 
+// ============================================================================
+// FLUID SIMULATION - Compute Shaders
+// ============================================================================
+
+// Update obstacle mask from voxel collisions
+const char* obstacleComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer BackgroundDensities {
+    float backgroundDensities[];
+};
+
+layout(std430, binding = 1) writeonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    // Point is an obstacle if it's inside the voxel grid
+    obstacles[index] = backgroundDensities[index] > 0.0 ? 1.0 : 0.0;
+}
+)";
+
+// Advection shader (semi-Lagrangian)
+const char* advectionComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer VelocityIn {
+    vec4 velocityIn[];
+};
+
+layout(std430, binding = 1) readonly buffer FieldIn {
+    float fieldIn[];
+};
+
+layout(std430, binding = 2) writeonly buffer FieldOut {
+    float fieldOut[];
+};
+
+layout(std430, binding = 3) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform float dt;
+uniform float dissipation;
+
+// Trilinear interpolation
+float sampleField(vec3 pos) {
+    vec3 gridSize = vec3(gridRes);
+    vec3 cellSize = (gridMax - gridMin) / (gridSize - 1.0);
+    
+    // Convert world position to grid coordinates
+    vec3 gridPos = (pos - gridMin) / cellSize;
+    gridPos = clamp(gridPos, vec3(0.5), gridSize - vec3(1.5));
+    
+    ivec3 i0 = ivec3(floor(gridPos));
+    ivec3 i1 = i0 + ivec3(1);
+    
+    i0 = clamp(i0, ivec3(0), gridRes - ivec3(1));
+    i1 = clamp(i1, ivec3(0), gridRes - ivec3(1));
+    
+    vec3 t = fract(gridPos);
+    
+    // 8 corner samples
+    float c000 = fieldIn[i0.x + i0.y * gridRes.x + i0.z * gridRes.x * gridRes.y];
+    float c100 = fieldIn[i1.x + i0.y * gridRes.x + i0.z * gridRes.x * gridRes.y];
+    float c010 = fieldIn[i0.x + i1.y * gridRes.x + i0.z * gridRes.x * gridRes.y];
+    float c110 = fieldIn[i1.x + i1.y * gridRes.x + i0.z * gridRes.x * gridRes.y];
+    float c001 = fieldIn[i0.x + i0.y * gridRes.x + i1.z * gridRes.x * gridRes.y];
+    float c101 = fieldIn[i1.x + i0.y * gridRes.x + i1.z * gridRes.x * gridRes.y];
+    float c011 = fieldIn[i0.x + i1.y * gridRes.x + i1.z * gridRes.x * gridRes.y];
+    float c111 = fieldIn[i1.x + i1.y * gridRes.x + i1.z * gridRes.x * gridRes.y];
+    
+    // Trilinear interpolation
+    float c00 = mix(c000, c100, t.x);
+    float c10 = mix(c010, c110, t.x);
+    float c01 = mix(c001, c101, t.x);
+    float c11 = mix(c011, c111, t.x);
+    
+    float c0 = mix(c00, c10, t.y);
+    float c1 = mix(c01, c11, t.y);
+    
+    return mix(c0, c1, t.z);
+}
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    // Skip obstacles
+    if (obstacles[index] > 0.5) {
+        fieldOut[index] = 0.0;
+        return;
+    }
+    
+    // Calculate world position
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    vec3 pos = gridMin + vec3(gid) * cellSize;
+    
+    // Get velocity at this position
+    vec3 vel = velocityIn[index].xyz;
+    
+    // Trace back in time (semi-Lagrangian)
+    vec3 prevPos = pos - vel * dt;
+    
+    // Sample the field at the previous position
+    float value = sampleField(prevPos);
+    
+    // Apply dissipation
+    fieldOut[index] = value * dissipation;
+}
+)";
+
+// Velocity advection shader (advects velocity field itself)
+const char* velocityAdvectionComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer VelocityIn {
+    vec4 velocityIn[];
+};
+
+layout(std430, binding = 1) writeonly buffer VelocityOut {
+    vec4 velocityOut[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform float dt;
+uniform float dissipation;
+
+// Trilinear interpolation for velocity
+vec3 sampleVelocity(vec3 pos) {
+    vec3 gridSize = vec3(gridRes);
+    vec3 cellSize = (gridMax - gridMin) / (gridSize - 1.0);
+    
+    vec3 gridPos = (pos - gridMin) / cellSize;
+    gridPos = clamp(gridPos, vec3(0.5), gridSize - vec3(1.5));
+    
+    ivec3 i0 = ivec3(floor(gridPos));
+    ivec3 i1 = i0 + ivec3(1);
+    
+    i0 = clamp(i0, ivec3(0), gridRes - ivec3(1));
+    i1 = clamp(i1, ivec3(0), gridRes - ivec3(1));
+    
+    vec3 t = fract(gridPos);
+    
+    vec3 c000 = velocityIn[i0.x + i0.y * gridRes.x + i0.z * gridRes.x * gridRes.y].xyz;
+    vec3 c100 = velocityIn[i1.x + i0.y * gridRes.x + i0.z * gridRes.x * gridRes.y].xyz;
+    vec3 c010 = velocityIn[i0.x + i1.y * gridRes.x + i0.z * gridRes.x * gridRes.y].xyz;
+    vec3 c110 = velocityIn[i1.x + i1.y * gridRes.x + i0.z * gridRes.x * gridRes.y].xyz;
+    vec3 c001 = velocityIn[i0.x + i0.y * gridRes.x + i1.z * gridRes.x * gridRes.y].xyz;
+    vec3 c101 = velocityIn[i1.x + i0.y * gridRes.x + i1.z * gridRes.x * gridRes.y].xyz;
+    vec3 c011 = velocityIn[i0.x + i1.y * gridRes.x + i1.z * gridRes.x * gridRes.y].xyz;
+    vec3 c111 = velocityIn[i1.x + i1.y * gridRes.x + i1.z * gridRes.x * gridRes.y].xyz;
+    
+    vec3 c00 = mix(c000, c100, t.x);
+    vec3 c10 = mix(c010, c110, t.x);
+    vec3 c01 = mix(c001, c101, t.x);
+    vec3 c11 = mix(c011, c111, t.x);
+    
+    vec3 c0 = mix(c00, c10, t.y);
+    vec3 c1 = mix(c01, c11, t.y);
+    
+    return mix(c0, c1, t.z);
+}
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    // Skip obstacles
+    if (obstacles[index] > 0.5) {
+        velocityOut[index] = vec4(0.0);
+        return;
+    }
+    
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    vec3 pos = gridMin + vec3(gid) * cellSize;
+    
+    vec3 vel = velocityIn[index].xyz;
+    vec3 prevPos = pos - vel * dt;
+    
+    vec3 newVel = sampleVelocity(prevPos);
+    velocityOut[index] = vec4(newVel * dissipation, 0.0);
+}
+)";
+
+// Smagorinsky LES turbulence model
+const char* turbulenceComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer VelocityIn {
+    vec4 velocityIn[];
+};
+
+layout(std430, binding = 1) buffer VelocityOut {
+    vec4 velocityOut[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+layout(std430, binding = 3) writeonly buffer TurbulentViscosity {
+    float turbulentViscosity[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform float dt;
+uniform float smagorinskyConst;  // Typically 0.1 - 0.2
+uniform float baseViscosity;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    if (obstacles[index] > 0.5) {
+        velocityOut[index] = vec4(0.0);
+        turbulentViscosity[index] = 0.0;
+        return;
+    }
+    
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    float dx = cellSize.x;
+    
+    // Get neighboring velocities for gradient calculation
+    // Boundary handling
+    int xm = max(gid.x - 1, 0);
+    int xp = min(gid.x + 1, gridRes.x - 1);
+    int ym = max(gid.y - 1, 0);
+    int yp = min(gid.y + 1, gridRes.y - 1);
+    int zm = max(gid.z - 1, 0);
+    int zp = min(gid.z + 1, gridRes.z - 1);
+    
+    vec3 vxm = velocityIn[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vxp = velocityIn[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vym = velocityIn[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vyp = velocityIn[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vzm = velocityIn[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y].xyz;
+    vec3 vzp = velocityIn[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y].xyz;
+    
+    // Compute strain rate tensor components (symmetric part of velocity gradient)
+    // S_ij = 0.5 * (du_i/dx_j + du_j/dx_i)
+    float dudx = (vxp.x - vxm.x) / (2.0 * dx);
+    float dvdy = (vyp.y - vym.y) / (2.0 * dx);
+    float dwdz = (vzp.z - vzm.z) / (2.0 * dx);
+    
+    float dudy = (vyp.x - vym.x) / (2.0 * dx);
+    float dvdx = (vxp.y - vxm.y) / (2.0 * dx);
+    
+    float dudz = (vzp.x - vzm.x) / (2.0 * dx);
+    float dwdx = (vxp.z - vxm.z) / (2.0 * dx);
+    
+    float dvdz = (vzp.y - vzm.y) / (2.0 * dx);
+    float dwdy = (vyp.z - vym.z) / (2.0 * dx);
+    
+    // Strain rate magnitude |S| = sqrt(2 * S_ij * S_ij)
+    float S11 = dudx;
+    float S22 = dvdy;
+    float S33 = dwdz;
+    float S12 = 0.5 * (dudy + dvdx);
+    float S13 = 0.5 * (dudz + dwdx);
+    float S23 = 0.5 * (dvdz + dwdy);
+    
+    float S_magnitude = sqrt(2.0 * (S11*S11 + S22*S22 + S33*S33 + 2.0*(S12*S12 + S13*S13 + S23*S23)));
+    
+    // Smagorinsky model: nu_t = (Cs * delta)^2 * |S|
+    float delta = dx;  // Filter width = grid spacing
+    float nu_t = pow(smagorinskyConst * delta, 2.0) * S_magnitude;
+    
+    turbulentViscosity[index] = nu_t;
+    
+    // Apply turbulent diffusion to velocity
+    // Laplacian of velocity
+    vec3 vel = velocityIn[index].xyz;
+    vec3 laplacian = (vxp + vxm + vyp + vym + vzp + vzm - 6.0 * vel) / (dx * dx);
+    
+    // Total viscosity = base + turbulent
+    float totalViscosity = baseViscosity + nu_t;
+    
+    // Explicit diffusion step
+    vec3 newVel = vel + totalViscosity * laplacian * dt;
+    
+    velocityOut[index] = vec4(newVel, 0.0);
+}
+)";
+
+// Diffusion solver (Jacobi iteration)
+const char* diffusionComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer FieldIn {
+    float fieldIn[];
+};
+
+layout(std430, binding = 1) buffer FieldOut {
+    float fieldOut[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform float alpha;  // dx^2 / (viscosity * dt)
+uniform float rBeta;  // 1 / (6 + alpha)
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    if (obstacles[index] > 0.5) {
+        fieldOut[index] = 0.0;
+        return;
+    }
+    
+    // Get neighbors with boundary handling
+    int xm = max(gid.x - 1, 0);
+    int xp = min(gid.x + 1, gridRes.x - 1);
+    int ym = max(gid.y - 1, 0);
+    int yp = min(gid.y + 1, gridRes.y - 1);
+    int zm = max(gid.z - 1, 0);
+    int zp = min(gid.z + 1, gridRes.z - 1);
+    
+    float xmVal = fieldIn[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float xpVal = fieldIn[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float ymVal = fieldIn[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float ypVal = fieldIn[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float zmVal = fieldIn[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y];
+    float zpVal = fieldIn[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y];
+    
+    float center = fieldIn[index];
+    
+    // Jacobi iteration
+    fieldOut[index] = (xmVal + xpVal + ymVal + ypVal + zmVal + zpVal + alpha * center) * rBeta;
+}
+)";
+
+// Divergence calculation
+const char* divergenceComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer Velocity {
+    vec4 velocity[];
+};
+
+layout(std430, binding = 1) writeonly buffer Divergence {
+    float divergence[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    if (obstacles[index] > 0.5) {
+        divergence[index] = 0.0;
+        return;
+    }
+    
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    float dx = cellSize.x;
+    
+    // Get neighbor indices with boundary handling
+    int xm = max(gid.x - 1, 0);
+    int xp = min(gid.x + 1, gridRes.x - 1);
+    int ym = max(gid.y - 1, 0);
+    int yp = min(gid.y + 1, gridRes.y - 1);
+    int zm = max(gid.z - 1, 0);
+    int zp = min(gid.z + 1, gridRes.z - 1);
+    
+    vec3 vxm = velocity[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vxp = velocity[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vym = velocity[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vyp = velocity[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y].xyz;
+    vec3 vzm = velocity[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y].xyz;
+    vec3 vzp = velocity[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y].xyz;
+    
+    // Handle obstacle boundaries (no-slip)
+    if (obstacles[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) vxm = vec3(0.0);
+    if (obstacles[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) vxp = vec3(0.0);
+    if (obstacles[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) vym = vec3(0.0);
+    if (obstacles[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) vyp = vec3(0.0);
+    if (obstacles[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y] > 0.5) vzm = vec3(0.0);
+    if (obstacles[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y] > 0.5) vzp = vec3(0.0);
+    
+    // Central difference divergence
+    float div = ((vxp.x - vxm.x) + (vyp.y - vym.y) + (vzp.z - vzm.z)) / (2.0 * dx);
+    
+    divergence[index] = div;
+}
+)";
+
+// Pressure solver (Jacobi iteration)
+const char* pressureComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) readonly buffer PressureIn {
+    float pressureIn[];
+};
+
+layout(std430, binding = 1) writeonly buffer PressureOut {
+    float pressureOut[];
+};
+
+layout(std430, binding = 2) readonly buffer Divergence {
+    float divergence[];
+};
+
+layout(std430, binding = 3) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    if (obstacles[index] > 0.5) {
+        pressureOut[index] = 0.0;
+        return;
+    }
+    
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    float dx = cellSize.x;
+    
+    // Get neighbors with boundary handling
+    int xm = max(gid.x - 1, 0);
+    int xp = min(gid.x + 1, gridRes.x - 1);
+    int ym = max(gid.y - 1, 0);
+    int yp = min(gid.y + 1, gridRes.y - 1);
+    int zm = max(gid.z - 1, 0);
+    int zp = min(gid.z + 1, gridRes.z - 1);
+    
+    float pxm = pressureIn[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pxp = pressureIn[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pym = pressureIn[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pyp = pressureIn[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pzm = pressureIn[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y];
+    float pzp = pressureIn[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y];
+    
+    // Handle obstacles - use center pressure for Neumann boundary
+    float pCenter = pressureIn[index];
+    if (obstacles[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pxm = pCenter;
+    if (obstacles[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pxp = pCenter;
+    if (obstacles[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pym = pCenter;
+    if (obstacles[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pyp = pCenter;
+    if (obstacles[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y] > 0.5) pzm = pCenter;
+    if (obstacles[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y] > 0.5) pzp = pCenter;
+    
+    // Jacobi iteration for pressure Poisson equation
+    float div = divergence[index];
+    pressureOut[index] = (pxm + pxp + pym + pyp + pzm + pzp - dx * dx * div) / 6.0;
+}
+)";
+
+// Gradient subtraction (pressure projection)
+const char* gradientSubtractComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) buffer Velocity {
+    vec4 velocity[];
+};
+
+layout(std430, binding = 1) readonly buffer Pressure {
+    float pressure[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    if (obstacles[index] > 0.5) {
+        velocity[index] = vec4(0.0);
+        return;
+    }
+    
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    float dx = cellSize.x;
+    
+    // Get neighbors
+    int xm = max(gid.x - 1, 0);
+    int xp = min(gid.x + 1, gridRes.x - 1);
+    int ym = max(gid.y - 1, 0);
+    int yp = min(gid.y + 1, gridRes.y - 1);
+    int zm = max(gid.z - 1, 0);
+    int zp = min(gid.z + 1, gridRes.z - 1);
+    
+    float pxm = pressure[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pxp = pressure[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pym = pressure[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pyp = pressure[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y];
+    float pzm = pressure[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y];
+    float pzp = pressure[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y];
+    
+    // Handle obstacle boundaries
+    float pCenter = pressure[index];
+    if (obstacles[xm + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pxm = pCenter;
+    if (obstacles[xp + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pxp = pCenter;
+    if (obstacles[gid.x + ym * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pym = pCenter;
+    if (obstacles[gid.x + yp * gridRes.x + gid.z * gridRes.x * gridRes.y] > 0.5) pyp = pCenter;
+    if (obstacles[gid.x + gid.y * gridRes.x + zm * gridRes.x * gridRes.y] > 0.5) pzm = pCenter;
+    if (obstacles[gid.x + gid.y * gridRes.x + zp * gridRes.x * gridRes.y] > 0.5) pzp = pCenter;
+    
+    // Compute pressure gradient
+    vec3 gradient;
+    gradient.x = (pxp - pxm) / (2.0 * dx);
+    gradient.y = (pyp - pym) / (2.0 * dx);
+    gradient.z = (pzp - pzm) / (2.0 * dx);
+    
+    // Subtract gradient from velocity
+    vec3 vel = velocity[index].xyz;
+    vel -= gradient;
+    
+    velocity[index] = vec4(vel, 0.0);
+}
+)";
+
+// Add density/velocity source
+const char* addSourceComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) buffer Density {
+    float density[];
+};
+
+layout(std430, binding = 1) buffer Velocity {
+    vec4 velocity[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform vec3 sourcePos;
+uniform vec3 sourceVelocity;
+uniform float sourceRadius;
+uniform float densityAmount;
+uniform float velocityAmount;
+uniform bool addDensity;
+uniform bool addVelocity;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    // Skip obstacles
+    if (obstacles[index] > 0.5) {
+        return;
+    }
+    
+    // Calculate world position
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - 1);
+    vec3 pos = gridMin + vec3(gid) * cellSize;
+    
+    // Check if within source radius
+    float dist = length(pos - sourcePos);
+    if (dist < sourceRadius) {
+        float falloff = 1.0 - (dist / sourceRadius);
+        falloff = falloff * falloff;  // Quadratic falloff
+        
+        if (addDensity) {
+            density[index] += densityAmount * falloff;
+        }
+        
+        if (addVelocity) {
+            vec3 vel = velocity[index].xyz;
+            vel += sourceVelocity * velocityAmount * falloff;
+            velocity[index] = vec4(vel, 0.0);
+        }
+    }
+}
+)";
+
+// Boundary conditions shader
+const char* boundaryComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) buffer Velocity {
+    vec4 velocity[];
+};
+
+layout(std430, binding = 1) buffer Density {
+    float density[];
+};
+
+layout(std430, binding = 2) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    // Zero velocity at obstacles
+    if (obstacles[index] > 0.5) {
+        velocity[index] = vec4(0.0);
+        density[index] = 0.0;
+        return;
+    }
+    
+    // Domain boundary conditions (closed box)
+    vec3 vel = velocity[index].xyz;
+    
+    // X boundaries
+    if (gid.x == 0) vel.x = max(vel.x, 0.0);
+    if (gid.x == gridRes.x - 1) vel.x = min(vel.x, 0.0);
+    
+    // Y boundaries
+    if (gid.y == 0) vel.y = max(vel.y, 0.0);
+    if (gid.y == gridRes.y - 1) vel.y = min(vel.y, 0.0);
+    
+    // Z boundaries
+    if (gid.z == 0) vel.z = max(vel.z, 0.0);
+    if (gid.z == gridRes.z - 1) vel.z = min(vel.z, 0.0);
+    
+    velocity[index] = vec4(vel, 0.0);
+}
+)";
+
 // Common vertex shader for all primitives
 const char* commonVertexShaderSource = R"(
 #version 430 core
@@ -376,6 +1161,428 @@ void initGPUBuffers(voxel_object& v) {
 }
 
 // ============================================================================
+// FLUID SIMULATION - Initialization
+// ============================================================================
+
+void initFluidSimulation() {
+    if (fluidInitialized) return;
+
+    cout << "Initializing fluid simulation..." << endl;
+
+    // Compile fluid compute shaders
+    advectionProgram = compileComputeShader(advectionComputeShader);
+    GLuint velocityAdvectionProg = compileComputeShader(velocityAdvectionComputeShader);
+    diffusionProgram = compileComputeShader(diffusionComputeShader);
+    divergenceProgram = compileComputeShader(divergenceComputeShader);
+    pressureProgram = compileComputeShader(pressureComputeShader);
+    gradientSubtractProgram = compileComputeShader(gradientSubtractComputeShader);
+    boundaryProgram = compileComputeShader(boundaryComputeShader);
+    addSourceProgram = compileComputeShader(addSourceComputeShader);
+    turbulenceProgram = compileComputeShader(turbulenceComputeShader);
+    obstacleProgram = compileComputeShader(obstacleComputeShader);
+
+    // Store velocity advection program (we'll use it separately)
+    static GLuint velAdvProg = velocityAdvectionProg;
+
+    if (!advectionProgram || !diffusionProgram || !divergenceProgram ||
+        !pressureProgram || !gradientSubtractProgram || !boundaryProgram ||
+        !addSourceProgram || !turbulenceProgram || !obstacleProgram) {
+        cerr << "Failed to compile fluid simulation shaders!" << endl;
+        return;
+    }
+
+    size_t gridSize = x_res * y_res * z_res;
+
+    // Initialize velocity buffers (double buffered)
+    vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
+    for (int i = 0; i < 2; i++) {
+        glGenBuffers(1, &velocitySSBO[i]);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(glm::vec4), zeroVelocity.data(), GL_DYNAMIC_COPY);
+    }
+
+    // Initialize density buffers (double buffered)
+    vector<float> zeroDensity(gridSize, 0.0f);
+    for (int i = 0; i < 2; i++) {
+        glGenBuffers(1, &densitySSBO[i]);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[i]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), zeroDensity.data(), GL_DYNAMIC_COPY);
+    }
+
+    // Initialize pressure buffers (double buffered)
+    for (int i = 0; i < 2; i++) {
+        glGenBuffers(1, &pressureSSBO[i]);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, pressureSSBO[i]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), zeroDensity.data(), GL_DYNAMIC_COPY);
+    }
+
+    // Initialize divergence buffer
+    glGenBuffers(1, &divergenceSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, divergenceSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), zeroDensity.data(), GL_DYNAMIC_COPY);
+
+    // Initialize obstacle buffer
+    glGenBuffers(1, &obstacleSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, obstacleSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), zeroDensity.data(), GL_DYNAMIC_COPY);
+
+    // Initialize turbulent viscosity buffer
+    glGenBuffers(1, &turbulentViscositySSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, turbulentViscositySSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), zeroDensity.data(), GL_DYNAMIC_COPY);
+
+    // Create fluid visualization VAO
+    glGenVertexArrays(1, &fluidVAO);
+    glGenBuffers(1, &fluidVBO);
+
+    fluidInitialized = true;
+    cout << "Fluid simulation initialized successfully" << endl;
+}
+
+// ============================================================================
+// FLUID SIMULATION - Update Obstacles from Voxels
+// ============================================================================
+
+void updateFluidObstacles() {
+    if (!fluidInitialized || !gpuInitialized) return;
+
+    glUseProgram(obstacleProgram);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, backgroundDensitiesSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, obstacleSSBO);
+
+    glUniform3i(glGetUniformLocation(obstacleProgram, "gridRes"), x_res, y_res, z_res);
+
+    GLuint groupsX = (x_res + 7) / 8;
+    GLuint groupsY = (y_res + 7) / 8;
+    GLuint groupsZ = (z_res + 7) / 8;
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+// ============================================================================
+// FLUID SIMULATION - Main Update Step
+// ============================================================================
+
+void stepFluidSimulation() {
+    if (!fluidInitialized || !fluidSimEnabled) return;
+
+    GLuint groupsX = (x_res + 7) / 8;
+    GLuint groupsY = (y_res + 7) / 8;
+    GLuint groupsZ = (z_res + 7) / 8;
+
+    glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
+    glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
+
+    int src = currentBuffer;
+    int dst = 1 - currentBuffer;
+
+    // ========================================
+    // 1. Apply turbulence (Smagorinsky LES)
+    // ========================================
+    glUseProgram(turbulenceProgram);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, velocitySSBO[dst]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, turbulentViscositySSBO);
+
+    glUniform3i(glGetUniformLocation(turbulenceProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(turbulenceProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(turbulenceProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+    glUniform1f(glGetUniformLocation(turbulenceProgram, "dt"), fluidParams.dt);
+    glUniform1f(glGetUniformLocation(turbulenceProgram, "smagorinskyConst"), fluidParams.smagorinskyConst);
+    glUniform1f(glGetUniformLocation(turbulenceProgram, "baseViscosity"), fluidParams.viscosity);
+
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // Swap buffers after turbulence
+    std::swap(src, dst);
+
+    // ========================================
+    // 2. Advect velocity (semi-Lagrangian)
+    // ========================================
+    // We need to compile velocity advection shader separately
+    static GLuint velAdvProg = 0;
+    if (velAdvProg == 0) {
+        velAdvProg = compileComputeShader(velocityAdvectionComputeShader);
+    }
+
+    glUseProgram(velAdvProg);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, velocitySSBO[dst]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+
+    glUniform3i(glGetUniformLocation(velAdvProg, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(velAdvProg, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(velAdvProg, "gridMax"), 1, glm::value_ptr(bgGridMax));
+    glUniform1f(glGetUniformLocation(velAdvProg, "dt"), fluidParams.dt);
+    glUniform1f(glGetUniformLocation(velAdvProg, "dissipation"), fluidParams.velocityDissipation);
+
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    std::swap(src, dst);
+
+    // ========================================
+    // 3. Advect density
+    // ========================================
+    glUseProgram(advectionProgram);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, densitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, densitySSBO[dst]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, obstacleSSBO);
+
+    glUniform3i(glGetUniformLocation(advectionProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(advectionProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(advectionProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+    glUniform1f(glGetUniformLocation(advectionProgram, "dt"), fluidParams.dt);
+    glUniform1f(glGetUniformLocation(advectionProgram, "dissipation"), fluidParams.densityDissipation);
+
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // Swap density buffers
+    std::swap(densitySSBO[0], densitySSBO[1]);
+
+    // ========================================
+    // 4. Compute divergence
+    // ========================================
+    glUseProgram(divergenceProgram);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, divergenceSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+
+    glUniform3i(glGetUniformLocation(divergenceProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(divergenceProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(divergenceProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // ========================================
+    // 5. Solve pressure (Jacobi iteration)
+    // ========================================
+    // Clear pressure
+    size_t gridSize = x_res * y_res * z_res;
+    vector<float> zeroPressure(gridSize, 0.0f);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, pressureSSBO[0]);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroPressure.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, pressureSSBO[1]);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroPressure.data());
+
+    glUseProgram(pressureProgram);
+    glUniform3i(glGetUniformLocation(pressureProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(pressureProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(pressureProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+
+    int pSrc = 0;
+    int pDst = 1;
+
+    for (int i = 0; i < fluidParams.jacobiIterations; i++) {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, pressureSSBO[pSrc]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, pressureSSBO[pDst]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, divergenceSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, obstacleSSBO);
+
+        glDispatchCompute(groupsX, groupsY, groupsZ);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+        std::swap(pSrc, pDst);
+    }
+
+    // ========================================
+    // 6. Subtract pressure gradient
+    // ========================================
+    glUseProgram(gradientSubtractProgram);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, pressureSSBO[pSrc]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+
+    glUniform3i(glGetUniformLocation(gradientSubtractProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(gradientSubtractProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(gradientSubtractProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // ========================================
+    // 7. Apply boundary conditions
+    // ========================================
+    glUseProgram(boundaryProgram);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, densitySSBO[0]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+
+    glUniform3i(glGetUniformLocation(boundaryProgram, "gridRes"), x_res, y_res, z_res);
+
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // Update current buffer index
+    currentBuffer = src;
+}
+
+// ============================================================================
+// FLUID SIMULATION - Add Source (Mouse Interaction)
+// ============================================================================
+
+void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool addDens, bool addVel) {
+    if (!fluidInitialized) return;
+
+    glUseProgram(addSourceProgram);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, densitySSBO[0]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, velocitySSBO[currentBuffer]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+
+    glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
+    glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
+
+    glUniform3i(glGetUniformLocation(addSourceProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3fv(glGetUniformLocation(addSourceProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+    glUniform3fv(glGetUniformLocation(addSourceProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+    glUniform3fv(glGetUniformLocation(addSourceProgram, "sourcePos"), 1, glm::value_ptr(position));
+    glUniform3fv(glGetUniformLocation(addSourceProgram, "sourceVelocity"), 1, glm::value_ptr(velocity));
+    glUniform1f(glGetUniformLocation(addSourceProgram, "sourceRadius"),
+        (x_grid_max * 2.0f / x_res) * injectRadius);
+    glUniform1f(glGetUniformLocation(addSourceProgram, "densityAmount"), fluidParams.densityAmount);
+    glUniform1f(glGetUniformLocation(addSourceProgram, "velocityAmount"), fluidParams.velocityAmount);
+    glUniform1i(glGetUniformLocation(addSourceProgram, "addDensity"), addDens ? 1 : 0);
+    glUniform1i(glGetUniformLocation(addSourceProgram, "addVelocity"), addVel ? 1 : 0);
+
+    GLuint groupsX = (x_res + 7) / 8;
+    GLuint groupsY = (y_res + 7) / 8;
+    GLuint groupsZ = (z_res + 7) / 8;
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+// ============================================================================
+// FLUID SIMULATION - Visualization
+// ============================================================================
+
+void updateFluidVisualization() {
+    if (!fluidInitialized) return;
+
+    size_t gridSize = x_res * y_res * z_res;
+
+    // Read back density
+    vector<float> densities(gridSize);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[0]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), densities.data());
+
+    // Read back obstacles for exclusion
+    vector<float> obstacles(gridSize);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, obstacleSSBO);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), obstacles.data());
+
+    // Build visualization points
+    vector<RenderVertex> fluidVertices;
+    fluidVertices.reserve(gridSize / 10);
+
+    float x_grid_min = -x_grid_max;
+    float y_grid_min = -y_grid_max;
+    float z_grid_min = -z_grid_max;
+
+    float x_step = (x_grid_max - x_grid_min) / (x_res - 1);
+    float y_step = (y_grid_max - y_grid_min) / (y_res - 1);
+    float z_step = (z_grid_max - z_grid_min) / (z_res - 1);
+
+    for (size_t z = 0; z < z_res; z++) {
+        for (size_t y = 0; y < y_res; y++) {
+            for (size_t x = 0; x < x_res; x++) {
+                size_t idx = x + y * x_res + z * x_res * y_res;
+
+                // Skip obstacles
+                if (obstacles[idx] > 0.5f) continue;
+
+                // Only show cells with density above threshold
+                if (densities[idx] > densityThreshold) {
+                    RenderVertex rv;
+                    rv.position[0] = x_grid_min + x * x_step;
+                    rv.position[1] = y_grid_min + y * y_step;
+                    rv.position[2] = z_grid_min + z * z_step;
+
+                    // Color based on density (blue to red heat map)
+                    float d = std::min(densities[idx] / 50.0f, 1.0f);
+                    rv.color[0] = d;                    // Red
+                    rv.color[1] = 0.2f * (1.0f - d);    // Green
+                    rv.color[2] = 1.0f - d;             // Blue
+
+                    fluidVertices.push_back(rv);
+                }
+            }
+        }
+    }
+
+    numFluidPoints = fluidVertices.size();
+
+    // Update VBO
+    glBindVertexArray(fluidVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, fluidVBO);
+    glBufferData(GL_ARRAY_BUFFER, fluidVertices.size() * sizeof(RenderVertex),
+        fluidVertices.empty() ? nullptr : fluidVertices.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+}
+
+void draw_fluid_fast() {
+    if (numFluidPoints == 0 || renderProgram == 0) return;
+
+    glUseProgram(renderProgram);
+
+    glm::mat4 identity(1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
+    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
+    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
+
+    glPointSize(4.0f);
+    glBindVertexArray(fluidVAO);
+    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(numFluidPoints));
+    glBindVertexArray(0);
+}
+
+// ============================================================================
+// Mouse Ray Casting for 3D Position
+// ============================================================================
+
+glm::vec3 screenToWorld(int mouseX, int mouseY, float depth) {
+    // Convert screen coordinates to normalized device coordinates
+    float x = (2.0f * mouseX) / win_x - 1.0f;
+    float y = 1.0f - (2.0f * mouseY) / win_y;
+    float z = depth;
+
+    glm::vec4 clipCoords(x, y, z, 1.0f);
+
+    // Inverse projection
+    glm::mat4 invProj = glm::inverse(main_camera.projection_mat);
+    glm::vec4 eyeCoords = invProj * clipCoords;
+    eyeCoords.z = -1.0f;
+    eyeCoords.w = 0.0f;
+
+    // Inverse view
+    glm::mat4 invView = glm::inverse(main_camera.view_mat);
+    glm::vec4 worldRay = invView * eyeCoords;
+    glm::vec3 rayDir = glm::normalize(glm::vec3(worldRay));
+
+    // Get camera position
+    glm::vec3 camPos = glm::vec3(invView[3]);
+
+    // Intersect with Y=0 plane (or use a default depth)
+    float t = -camPos.y / rayDir.y;
+    if (t < 0 || std::abs(rayDir.y) < 0.001f) {
+        // Use a fixed distance if no good intersection
+        t = 10.0f;
+    }
+
+    return camPos + rayDir * t;
+}
+
+// ============================================================================
 // GPU Background Points Computation
 // ============================================================================
 
@@ -419,6 +1626,11 @@ void get_background_points_GPU(voxel_object& v) {
 
     glDispatchCompute(groupsX, groupsY, groupsZ);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // Update fluid obstacles after voxel collision update
+    if (fluidInitialized) {
+        updateFluidObstacles();
+    }
 }
 
 // ============================================================================
@@ -575,166 +1787,6 @@ void draw_axis_fast() {
 }
 
 // ============================================================================
-// Legacy drawing functions (kept for compatibility)
-// ============================================================================
-
-void draw_triangles(const std::vector<custom_math::vertex_3>& positions, const std::vector<custom_math::vertex_3>& colors, glm::mat4 model) {
-    if (positions.empty() || colors.empty() || positions.size() != colors.size()) {
-        return;
-    }
-
-    std::vector<GLuint> indices;
-    for (size_t i = 0; i < positions.size(); i += 3) {
-        if (i + 2 < positions.size()) {
-            indices.push_back(static_cast<GLuint>(i));
-            indices.push_back(static_cast<GLuint>(i + 1));
-            indices.push_back(static_cast<GLuint>(i + 2));
-        }
-    }
-
-    std::vector<RenderVertex> vertices;
-    for (size_t i = 0; i < positions.size(); ++i) {
-        RenderVertex vertex;
-        vertex.position[0] = positions[i].x;
-        vertex.position[1] = positions[i].y;
-        vertex.position[2] = positions[i].z;
-        vertex.color[0] = colors[i].x;
-        vertex.color[1] = colors[i].y;
-        vertex.color[2] = colors[i].z;
-        vertices.push_back(vertex);
-    }
-
-    GLuint shaderProgram = createShaderProgram(commonVertexShaderSource, commonFragmentShaderSource);
-    if (shaderProgram == 0) return;
-
-    GLuint vao, vbo, ebo;
-    glGenVertexArrays(1, &vao);
-    glBindVertexArray(vao);
-
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex), vertices.data(), GL_STATIC_DRAW);
-
-    glGenBuffers(1, &ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint), indices.data(), GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glUseProgram(shaderProgram);
-
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
-
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
-
-    glBindVertexArray(0);
-    glDeleteBuffers(1, &vbo);
-    glDeleteBuffers(1, &ebo);
-    glDeleteVertexArrays(1, &vao);
-    glDeleteProgram(shaderProgram);
-}
-
-void draw_lines(const std::vector<custom_math::vertex_3>& positions, const std::vector<custom_math::vertex_3>& colors, glm::mat4 model) {
-    if (positions.empty() || colors.empty() || positions.size() != colors.size()) {
-        return;
-    }
-
-    std::vector<RenderVertex> vertices;
-    for (size_t i = 0; i < positions.size(); ++i) {
-        RenderVertex vertex;
-        vertex.position[0] = positions[i].x;
-        vertex.position[1] = positions[i].y;
-        vertex.position[2] = positions[i].z;
-        vertex.color[0] = colors[i].x;
-        vertex.color[1] = colors[i].y;
-        vertex.color[2] = colors[i].z;
-        vertices.push_back(vertex);
-    }
-
-    GLuint shaderProgram = createShaderProgram(commonVertexShaderSource, commonFragmentShaderSource);
-    if (shaderProgram == 0) return;
-
-    GLuint vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glBindVertexArray(vao);
-
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex), vertices.data(), GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glUseProgram(shaderProgram);
-
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
-
-    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(vertices.size()));
-
-    glBindVertexArray(0);
-    glDeleteBuffers(1, &vbo);
-    glDeleteVertexArrays(1, &vao);
-    glDeleteProgram(shaderProgram);
-}
-
-void draw_points(const std::vector<custom_math::vertex_3>& positions, const std::vector<custom_math::vertex_3>& colors, glm::mat4 model) {
-    if (positions.empty() || colors.empty() || positions.size() != colors.size()) {
-        return;
-    }
-
-    std::vector<RenderVertex> vertices;
-    for (size_t i = 0; i < positions.size(); ++i) {
-        RenderVertex vertex;
-        vertex.position[0] = positions[i].x;
-        vertex.position[1] = positions[i].y;
-        vertex.position[2] = positions[i].z;
-        vertex.color[0] = colors[i].x;
-        vertex.color[1] = colors[i].y;
-        vertex.color[2] = colors[i].z;
-        vertices.push_back(vertex);
-    }
-
-    GLuint shaderProgram = createShaderProgram(commonVertexShaderSource, commonFragmentShaderSource);
-    if (shaderProgram == 0) return;
-
-    GLuint vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glBindVertexArray(vao);
-
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex), vertices.data(), GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glUseProgram(shaderProgram);
-
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
-
-    glPointSize(5.0f);
-    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(vertices.size()));
-
-    glBindVertexArray(0);
-    glDeleteBuffers(1, &vbo);
-    glDeleteVertexArrays(1, &vao);
-    glDeleteProgram(shaderProgram);
-}
-
-// ============================================================================
 // Screenshot functionality
 // ============================================================================
 
@@ -781,7 +1833,16 @@ void take_screenshot(size_t num_cams_wide, const char* filename, const bool reve
         {
             cout << "Camera: " << cam_count + 1 << " of " << total_cams << endl;
             main_camera.Set_Large_Screenshot(num_cams_wide, cam_num_x, cam_num_y, win_x, win_y);
-            display_func();
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            // Draw objects for screenshot
+            draw_points_fast();
+            if (draw_triangles_on_screen) {
+                draw_triangles_fast(vo.model_matrix);
+            }
+            if (draw_axis) {
+                draw_axis_fast();
+            }
+            glFlush();
             glReadPixels(0, 0, win_x, win_y, GL_RGB, GL_UNSIGNED_BYTE, &fbpixels[0]);
 
             for (GLint i = 0; i < win_x; i++)
@@ -828,75 +1889,6 @@ void take_screenshot(size_t num_cams_wide, const char* filename, const bool reve
 }
 
 // ============================================================================
-// Main entry point
-// ============================================================================
-
-int main(int argc, char** argv)
-{
-    glutInit(&argc, argv);
-    init_opengl(win_x, win_y);
-
-    GLenum err = glewInit();
-    if (GLEW_OK != err) {
-        cerr << "Error: " << glewGetErrorString(err) << endl;
-        return 1;
-    }
-
-    // Check for compute shader support
-    if (!GLEW_ARB_compute_shader) {
-        cerr << "Error: Compute shaders not supported!" << endl;
-        return 1;
-    }
-
-    cout << "OpenGL Version: " << glGetString(GL_VERSION) << endl;
-    cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << endl;
-
-    test_texture.resize(x_res * y_res * z_res, 0);
-    for (size_t x = 0; x < x_res; x++) {
-        for (size_t y = 0; y < y_res; y++) {
-            for (size_t z = 0; z < z_res; z++) {
-                const size_t voxel_index = x + y * x_res + z * x_res * y_res;
-                if (y >= y_res / 2)
-                    test_texture[voxel_index] = 255;
-            }
-        }
-    }
-
-    vo.model_matrix = glm::mat4(1.0f);
-    get_voxels("chr_knight.vox", vo);
-    get_triangles(vo.tri_vec, vo);
-
-    // Initialize GPU buffers after loading voxel data
-    initGPUBuffers(vo);
-
-    // Initial GPU computation
-    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    get_background_points_GPU(vo);
-    glFinish(); // Wait for GPU to complete
-    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<float, std::milli> elapsed = end - start;
-    cout << "Initial GPU background points computation: " << elapsed.count() << " ms" << endl;
-
-    // Update render buffers
-    updateTriangleBuffer(vo);
-    updateSurfacePointsForRendering(vo);
-
-    cout << "Surface points: " << numSurfacePoints << endl;
-
-    glutReshapeFunc(reshape_func);
-    glutIdleFunc(idle_func);
-    glutDisplayFunc(display_func);
-    glutKeyboardFunc(keyboard_func);
-    glutMouseFunc(mouse_func);
-    glutMotionFunc(motion_func);
-    glutPassiveMotionFunc(passive_motion_func);
-
-    glutMainLoop();
-
-    return 0;
-}
-
-// ============================================================================
 // GLUT Callbacks
 // ============================================================================
 
@@ -916,13 +1908,17 @@ void init_opengl(const int& width, const int& height)
     glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE | GLUT_DEPTH);
     glutInitWindowPosition(0, 0);
     glutInitWindowSize(win_x, win_y);
-    win_id = glutCreateWindow("GPU Compute Shader Voxel Viewer");
+    win_id = glutCreateWindow("GPU Fluid Simulation with Voxel Obstacles");
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glDepthMask(GL_TRUE);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
+
+    // Enable blending for fluid visualization
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glClearColor((float)background_colour.x, (float)background_colour.y, (float)background_colour.z, 1);
     glClearDepth(1.0f);
@@ -947,18 +1943,46 @@ void reshape_func(int width, int height)
 
 void draw_objects(void)
 {
-    // Draw surface points using optimized function
+    // Draw surface points (voxel boundaries)
     draw_points_fast();
 
-    // Draw triangles using optimized function
+    // Draw triangles (voxel mesh)
     if (draw_triangles_on_screen) {
         draw_triangles_fast(vo.model_matrix);
     }
 
-    // Draw axes using optimized function
+    // Draw fluid
+    if (fluidSimEnabled) {
+        draw_fluid_fast();
+    }
+
+    // Draw axes
     if (draw_axis) {
         draw_axis_fast();
     }
+}
+
+// Timer callback for fluid simulation
+void fluid_timer_func(int value) {
+    if (fluidSimEnabled && fluidInitialized) {
+        // Step the fluid simulation
+        stepFluidSimulation();
+
+        // Handle mouse injection
+        if (injectDensity || injectVelocity) {
+            mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
+            addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
+            lastMouseWorldPos = currentMouseWorldPos;
+        }
+
+        // Update visualization
+        updateFluidVisualization();
+    }
+
+    glutPostRedisplay();
+
+    // Continue timer (~60 fps)
+    glutTimerFunc(16, fluid_timer_func, 0);
 }
 
 void display_func(void)
@@ -989,6 +2013,60 @@ void keyboard_func(unsigned char key, int x, int y)
 
     case 'e':
         draw_control_list = !draw_control_list;
+        break;
+
+        // Toggle fluid simulation
+    case 'f':
+        fluidSimEnabled = !fluidSimEnabled;
+        cout << "Fluid simulation: " << (fluidSimEnabled ? "ON" : "OFF") << endl;
+        break;
+
+        // Reset fluid
+    case 'c':
+        if (fluidInitialized) {
+            size_t gridSize = x_res * y_res * z_res;
+            vector<float> zeroDensity(gridSize, 0.0f);
+            vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
+
+            for (int i = 0; i < 2; i++) {
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[i]);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroDensity.data());
+
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(glm::vec4), zeroVelocity.data());
+            }
+            cout << "Fluid reset" << endl;
+        }
+        break;
+
+        // Adjust viscosity
+    case '[':
+        fluidParams.viscosity *= 0.5f;
+        cout << "Viscosity: " << fluidParams.viscosity << endl;
+        break;
+    case ']':
+        fluidParams.viscosity *= 2.0f;
+        cout << "Viscosity: " << fluidParams.viscosity << endl;
+        break;
+
+        // Adjust Smagorinsky constant
+    case '-':
+        fluidParams.smagorinskyConst = std::max(0.01f, fluidParams.smagorinskyConst - 0.02f);
+        cout << "Smagorinsky constant: " << fluidParams.smagorinskyConst << endl;
+        break;
+    case '=':
+        fluidParams.smagorinskyConst = std::min(0.5f, fluidParams.smagorinskyConst + 0.02f);
+        cout << "Smagorinsky constant: " << fluidParams.smagorinskyConst << endl;
+        break;
+
+        // Adjust injection radius
+    case ',':
+        injectRadius = std::max(1, injectRadius - 1);
+        cout << "Injection radius: " << injectRadius << endl;
+        break;
+    case '.':
+        injectRadius = std::min(10, injectRadius + 1);
+        cout << "Injection radius: " << injectRadius << endl;
         break;
 
     case 'o':
@@ -1081,6 +2159,26 @@ void keyboard_func(unsigned char key, int x, int y)
         break;
     }
 
+    // Print controls
+    case 'h':
+        cout << "\n=== CONTROLS ===" << endl;
+        cout << "F: Toggle fluid simulation" << endl;
+        cout << "C: Clear/reset fluid" << endl;
+        cout << "Middle Mouse + Drag: Inject density and velocity" << endl;
+        cout << "Shift + Middle Mouse: Inject density only" << endl;
+        cout << "[/]: Decrease/increase viscosity" << endl;
+        cout << "-/=: Decrease/increase turbulence (Smagorinsky constant)" << endl;
+        cout << ",/.: Decrease/increase injection radius" << endl;
+        cout << "O/P: Rotate voxel object Y-axis" << endl;
+        cout << "K/L: Rotate voxel object X-axis" << endl;
+        cout << "T: Toggle triangle mesh" << endl;
+        cout << "W: Toggle axes" << endl;
+        cout << "R: Toggle real-time rotation" << endl;
+        cout << "M: Take screenshot" << endl;
+        cout << "H: Show this help" << endl;
+        cout << "================\n" << endl;
+        break;
+
     default:
         break;
     }
@@ -1093,6 +2191,27 @@ void mouse_func(int button, int state, int x, int y)
     }
     else if (GLUT_MIDDLE_BUTTON == button) {
         mmb_down = (GLUT_DOWN == state);
+
+        // Start/stop fluid injection
+        if (mmb_down) {
+            int modifiers = glutGetModifiers();
+            if (modifiers & GLUT_ACTIVE_SHIFT) {
+                // Shift + Middle = density only
+                injectDensity = true;
+                injectVelocity = false;
+            }
+            else {
+                // Middle = both density and velocity
+                injectDensity = true;
+                injectVelocity = true;
+            }
+            currentMouseWorldPos = screenToWorld(x, y, 0.0f);
+            lastMouseWorldPos = currentMouseWorldPos;
+        }
+        else {
+            injectDensity = false;
+            injectVelocity = false;
+        }
     }
     else if (GLUT_RIGHT_BUTTON == button) {
         rmb_down = (GLUT_DOWN == state);
@@ -1118,6 +2237,10 @@ void motion_func(int x, int y)
         main_camera.w -= static_cast<float>(mouse_delta_y) * w_spacer;
         if (main_camera.w < 1.1f)
             main_camera.w = 1.1f;
+    }
+    else if (mmb_down) {
+        // Update mouse world position for fluid injection
+        currentMouseWorldPos = screenToWorld(x, y, 0.0f);
     }
 
     main_camera.calculate_camera_matrices(win_x, win_y);
@@ -1154,5 +2277,118 @@ void cleanup(void)
     glDeleteVertexArrays(1, &axisVAO);
     glDeleteBuffers(1, &axisVBO);
 
+    // Cleanup fluid resources
+    if (fluidInitialized) {
+        glDeleteBuffers(2, velocitySSBO);
+        glDeleteBuffers(2, densitySSBO);
+        glDeleteBuffers(2, pressureSSBO);
+        glDeleteBuffers(1, &divergenceSSBO);
+        glDeleteBuffers(1, &obstacleSSBO);
+        glDeleteBuffers(1, &turbulentViscositySSBO);
+
+        glDeleteVertexArrays(1, &fluidVAO);
+        glDeleteBuffers(1, &fluidVBO);
+
+        if (advectionProgram) glDeleteProgram(advectionProgram);
+        if (diffusionProgram) glDeleteProgram(diffusionProgram);
+        if (divergenceProgram) glDeleteProgram(divergenceProgram);
+        if (pressureProgram) glDeleteProgram(pressureProgram);
+        if (gradientSubtractProgram) glDeleteProgram(gradientSubtractProgram);
+        if (boundaryProgram) glDeleteProgram(boundaryProgram);
+        if (addSourceProgram) glDeleteProgram(addSourceProgram);
+        if (turbulenceProgram) glDeleteProgram(turbulenceProgram);
+        if (obstacleProgram) glDeleteProgram(obstacleProgram);
+    }
+
     glutDestroyWindow(win_id);
+}
+
+// ============================================================================
+// Main entry point
+// ============================================================================
+
+int main(int argc, char** argv)
+{
+    glutInit(&argc, argv);
+    init_opengl(win_x, win_y);
+
+    GLenum err = glewInit();
+    if (GLEW_OK != err) {
+        cerr << "Error: " << glewGetErrorString(err) << endl;
+        return 1;
+    }
+
+    // Check for compute shader support
+    if (!GLEW_ARB_compute_shader) {
+        cerr << "Error: Compute shaders not supported!" << endl;
+        return 1;
+    }
+
+    cout << "OpenGL Version: " << glGetString(GL_VERSION) << endl;
+    cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << endl;
+
+    test_texture.resize(x_res * y_res * z_res, 0);
+    for (size_t x = 0; x < x_res; x++) {
+        for (size_t y = 0; y < y_res; y++) {
+            for (size_t z = 0; z < z_res; z++) {
+                const size_t voxel_index = x + y * x_res + z * x_res * y_res;
+                if (y >= y_res / 2)
+                    test_texture[voxel_index] = 255;
+            }
+        }
+    }
+
+    vo.model_matrix = glm::mat4(1.0f);
+    get_voxels("chr_knight.vox", vo);
+    get_triangles(vo.tri_vec, vo);
+
+    // Initialize GPU buffers after loading voxel data
+    initGPUBuffers(vo);
+
+    // Initial GPU computation
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    get_background_points_GPU(vo);
+    glFinish(); // Wait for GPU to complete
+    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<float, std::milli> elapsed = end - start;
+    cout << "Initial GPU background points computation: " << elapsed.count() << " ms" << endl;
+
+    // Update render buffers
+    updateTriangleBuffer(vo);
+    updateSurfacePointsForRendering(vo);
+
+    cout << "Surface points: " << numSurfacePoints << endl;
+
+    // Initialize fluid simulation
+    initFluidSimulation();
+
+    // Update obstacles from voxel collisions
+    updateFluidObstacles();
+
+    // Print controls
+    cout << "\n=== FLUID SIMULATION CONTROLS ===" << endl;
+    cout << "F: Toggle fluid simulation" << endl;
+    cout << "C: Clear/reset fluid" << endl;
+    cout << "Middle Mouse + Drag: Inject density and velocity" << endl;
+    cout << "Shift + Middle Mouse: Inject density only" << endl;
+    cout << "[/]: Decrease/increase viscosity" << endl;
+    cout << "-/=: Decrease/increase turbulence" << endl;
+    cout << ",/.: Decrease/increase injection radius" << endl;
+    cout << "H: Show all controls" << endl;
+    cout << "=================================\n" << endl;
+
+    glutReshapeFunc(reshape_func);
+    glutIdleFunc(idle_func);
+    glutDisplayFunc(display_func);
+    glutKeyboardFunc(keyboard_func);
+    glutMouseFunc(mouse_func);
+    glutMotionFunc(motion_func);
+    glutPassiveMotionFunc(passive_motion_func);
+
+    // Start fluid simulation timer
+    glutTimerFunc(16, fluid_timer_func, 0);
+
+    glutMainLoop();
+
+    return 0;
 }
