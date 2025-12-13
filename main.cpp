@@ -1417,22 +1417,41 @@ void updateFluidVisualization() {
                 size_t idx = x + y * x_res + z * x_res * y_res;
 
                 // Skip obstacles
-                if (obstacles[idx] > 0.5f) continue;
+                if (obstacles[idx] > 0.5f)
+                {
+                    continue;
 
-                // Only show cells with density above threshold
-                if (densities[idx] > densityThreshold) {
-                    RenderVertex rv;
-                    rv.position[0] = x_grid_min + x * x_step;
-                    rv.position[1] = y_grid_min + y * y_step;
-                    rv.position[2] = z_grid_min + z * z_step;
+                    //RenderVertex rv;
+                    //rv.position[0] = x_grid_min + x * x_step;
+                    //rv.position[1] = y_grid_min + y * y_step;
+                    //rv.position[2] = z_grid_min + z * z_step;
 
-                    // Color based on density (blue to red heat map)
-                    float d = std::min(densities[idx] / 50.0f, 1.0f);
-                    rv.color[0] = d;                    // Red
-                    rv.color[1] = 0.2f * (1.0f - d);    // Green
-                    rv.color[2] = 1.0f - d;             // Blue
+                    //// Color based on density (blue to red heat map)
+                    //float d = std::min(densities[idx] / 50.0f, 1.0f);
+                    //rv.color[0] = 1.0f;                    // Red
+                    //rv.color[1] = 1.0f;    // Green
+                    //rv.color[2] = 1.0f;             // Blue
 
-                    fluidVertices.push_back(rv);
+                    //fluidVertices.push_back(rv);
+
+                }
+                else
+                {
+                    // Only show cells with density above threshold
+                    if (densities[idx] > densityThreshold) {
+                        RenderVertex rv;
+                        rv.position[0] = x_grid_min + x * x_step;
+                        rv.position[1] = y_grid_min + y * y_step;
+                        rv.position[2] = z_grid_min + z * z_step;
+
+                        // Color based on density (blue to red heat map)
+                        float d = std::min(densities[idx] / 50.0f, 1.0f);
+                        rv.color[0] = d;                    // Red
+                        rv.color[1] = 0.2f * (1.0f - d);    // Green
+                        rv.color[2] = 1.0f - d;             // Blue
+
+                        fluidVertices.push_back(rv);
+                    }
                 }
             }
         }
