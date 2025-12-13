@@ -92,6 +92,124 @@ const float z_grid_max = 10;
 
 
 
+// Fluid simulation parameters
+struct FluidParams {
+	float dt = 0.016f;              // Time step (~60 fps)
+	float viscosity = 0.0001f;      // Kinematic viscosity
+	float diffusion = 0.0001f;      // Density diffusion rate
+	int jacobiIterations = 40;      // Pressure solver iterations
+	float smagorinskyConst = 0.1f;  // Smagorinsky constant for LES turbulence
+	float densityAmount = 100.0f;   // Amount of density to inject
+	float velocityAmount = 1.0f;   // Amount of velocity to inject
+	float densityDissipation = 0.995f; // Density dissipation per frame
+	float velocityDissipation = 0.99f; // Velocity dissipation per frame
+};
+
+FluidParams fluidParams;
+bool fluidSimEnabled = true;
+bool fluidInitialized = false;
+
+// Fluid SSBOs
+GLuint velocitySSBO[2] = { 0, 0 };      // Double buffered velocity (vec4: vx, vy, vz, 0)
+GLuint densitySSBO[2] = { 0, 0 };       // Double buffered density
+GLuint pressureSSBO[2] = { 0, 0 };      // Double buffered pressure
+GLuint divergenceSSBO = 0;             // Divergence field
+GLuint obstacleSSBO = 0;               // Obstacle mask (1 = obstacle, 0 = fluid)
+GLuint turbulentViscositySSBO = 0;     // Smagorinsky turbulent viscosity
+
+// Fluid compute shader programs
+GLuint advectionProgram = 0;
+GLuint diffusionProgram = 0;
+GLuint divergenceProgram = 0;
+GLuint pressureProgram = 0;
+GLuint gradientSubtractProgram = 0;
+GLuint boundaryProgram = 0;
+GLuint addSourceProgram = 0;
+GLuint turbulenceProgram = 0;
+GLuint obstacleProgram = 0;
+GLuint visualizeProgram = 0;
+
+int currentBuffer = 0;  // For double buffering
+
+// Mouse interaction
+bool injectDensity = false;
+bool injectVelocity = false;
+glm::vec3 lastMouseWorldPos(0.0f);
+glm::vec3 currentMouseWorldPos(0.0f);
+glm::vec3 mouseVelocity(0.0f);
+int injectRadius = 3;
+
+// Fluid visualization
+GLuint fluidVAO = 0, fluidVBO = 0;
+GLuint fluidRenderProgram = 0;
+size_t numFluidPoints = 0;
+float densityThreshold = 0.01f;
+
+
+
+// Vertex structure for shader compatibility
+struct RenderVertex {
+	float position[3];
+	float color[3];
+};
+
+// GPU Buffer handles
+GLuint computeProgram = 0;
+GLuint surfaceComputeProgram = 0;
+
+// SSBOs for compute shader
+GLuint voxelCentresSSBO = 0;
+GLuint voxelDensitiesSSBO = 0;
+GLuint gridMinMaxSSBO = 0;
+GLuint backgroundDensitiesSSBO = 0;
+GLuint backgroundCollisionsSSBO = 0;
+GLuint surfaceDensitiesSSBO = 0;
+GLuint voGridCellsSSBO = 0;
+
+// Persistent render buffers
+GLuint triangleVAO = 0, triangleVBO = 0, triangleEBO = 0;
+GLuint pointVAO = 0, pointVBO = 0;
+GLuint axisVAO = 0, axisVBO = 0;
+GLuint renderProgram = 0;
+
+
+
+
+
+
+// Add this function to main.cpp after the fluid simulation functions
+float getFluidDensityAtPoint(const glm::vec3& worldPos) {
+	if (!fluidInitialized) return 0.0f;
+
+	glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
+	glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
+	glm::vec3 gridSize = glm::vec3(x_res, y_res, z_res);
+	glm::vec3 cellSize = (bgGridMax - bgGridMin) / (gridSize - 1.0f);
+
+	// Convert world position to grid coordinates
+	glm::vec3 gridPos = (worldPos - bgGridMin) / cellSize;
+	gridPos = glm::clamp(gridPos, glm::vec3(0.5f), gridSize - glm::vec3(1.5f));
+
+	ivec3 cell = glm::ivec3(glm::floor(gridPos));
+
+	// Ensure within bounds
+	cell.x = glm::clamp(cell.x, 0, int(x_res - 1));
+	cell.y = glm::clamp(cell.y, 0, int(y_res - 1));
+	cell.z = glm::clamp(cell.z, 0, int(z_res - 1));
+
+	size_t index = cell.x + cell.y * x_res + cell.z * x_res * y_res;
+
+	// Read density at this position
+	float density = 0.0f;
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[0]);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+		index * sizeof(float),
+		sizeof(float),
+		&density);
+
+	return density;
+}
+
 
 class voxel_object
 {
@@ -902,10 +1020,111 @@ void get_surface_points(void)
 }
 
 
+bool gpuInitialized = false;
+size_t numSurfacePoints = 0;
+
+// ============================================================================
+// Update triangle buffer for rendering
+// ============================================================================
+
+size_t numTriangleIndices = 0;
+
+void updateTriangleBuffer(voxel_object& v) {
+	if (!gpuInitialized) return;
+
+	vector<RenderVertex> vertices;
+	vector<GLuint> indices;
+
+	for (size_t i = 0; i < v.tri_vec.size(); i++) {
+		for (size_t j = 0; j < 3; j++) {
+			RenderVertex rv;
+			rv.position[0] = v.tri_vec[i].vertex[j].x;
+			rv.position[1] = v.tri_vec[i].vertex[j].y;
+			rv.position[2] = v.tri_vec[i].vertex[j].z;
+			rv.color[0] = v.tri_vec[i].colour.x;
+			rv.color[1] = v.tri_vec[i].colour.y;
+			rv.color[2] = v.tri_vec[i].colour.z;
+			vertices.push_back(rv);
+			indices.push_back(static_cast<GLuint>(vertices.size() - 1));
+		}
+	}
+
+	numTriangleIndices = indices.size();
+
+	glBindVertexArray(triangleVAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, triangleVBO);
+	glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex),
+		vertices.empty() ? nullptr : vertices.data(), GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, triangleEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
+		indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
+	glEnableVertexAttribArray(1);
+
+	glBindVertexArray(0);
+}
 
 
-void do_blackening(voxel_object &v)
+
+
+// Replace the do_blackening function with this corrected version
+void do_blackening(voxel_object& v)
 {
+	if (!gpuInitialized) {
+		cout << "GPU not initialized!" << endl;
+		return;
+	}
+
+	// Read all necessary data from GPU
+	size_t gridSize = x_res * y_res * z_res;
+
+	// Read surface densities
+	vector<float> surfaceDensities(gridSize);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, surfaceDensitiesSSBO);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+		gridSize * sizeof(float),
+		surfaceDensities.data());
+
+	// Read background densities (1.0 = inside voxel, 0.0 = outside)
+	vector<float> backgroundDensities(gridSize);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, backgroundDensitiesSSBO);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+		gridSize * sizeof(float),
+		backgroundDensities.data());
+
+	// Read background collisions (voxel indices for points inside voxels)
+	vector<int> backgroundCollisions(gridSize);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, backgroundCollisionsSSBO);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+		gridSize * sizeof(int),
+		backgroundCollisions.data());
+
+	// Read fluid densities if available
+	vector<float> fluidDensities;
+	if (fluidInitialized && fluidSimEnabled) {
+		fluidDensities.resize(gridSize);
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[0]);
+		glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+			gridSize * sizeof(float),
+			fluidDensities.data());
+	}
+
+	// Track which voxels need to be blackened
+	vector<bool> voxelsToBlacken(v.voxel_centres.size(), false);
+
+	// Check all 6 neighbor directions
+	const ivec3 dirs[6] = {
+		ivec3(1, 0, 0), ivec3(-1, 0, 0),
+		ivec3(0, 1, 0), ivec3(0, -1, 0),
+		ivec3(0, 0, 1), ivec3(0, 0, -1)
+		};
+
+	// Process each grid point
 	for (size_t x = 0; x < x_res; x++)
 	{
 		for (size_t y = 0; y < y_res; y++)
@@ -914,28 +1133,70 @@ void do_blackening(voxel_object &v)
 			{
 				const size_t index = x + y * x_res + z * x_res * y_res;
 
-				if (v.background_surface_densities[index] == 0.0)
+				// Check if this is a surface point
+				if (surfaceDensities[index] <= 0.0f)
 					continue;
 
-				for (size_t i = 0; i < v.background_surface_collisions[index].size(); i++)
-				{
-					v.voxel_colours[v.background_surface_collisions[index][i]].r *= test_texture[index] / 255.0f;
-					v.voxel_colours[v.background_surface_collisions[index][i]].g *= test_texture[index] / 255.0f;
-					v.voxel_colours[v.background_surface_collisions[index][i]].b *= test_texture[index] / 255.0f;
-					v.voxel_colours[v.background_surface_collisions[index][i]].a = 1.0f;
+				// Check if this surface point has fluid density
+				bool hasFluid = false;
+				if (!fluidDensities.empty()) {
+					float fluidDensity = fluidDensities[index];
+
+					// Check if density is above threshold
+					if (fluidDensity > 0.1f) { // Adjust threshold as needed
+						hasFluid = true;
+					}
 				}
 
-				//cout << background_surface_collisions[index].size() << endl;
+				// If surface point has fluid, check its neighbors for voxels
+				if (hasFluid) {
+					ivec3 gid(x, y, z);
 
-				//if (y >= voxel_y_res / 2)
-				//	test_texture[voxel_index] = 1.0;
-				//else
-				//	test_texture[voxel_index] = 0.0;
+					for (int d = 0; d < 6; d++) {
+						ivec3 neighbor = gid + dirs[d];
+
+						// Check bounds
+						if (neighbor.x < 0 || neighbor.x >= x_res ||
+							neighbor.y < 0 || neighbor.y >= y_res ||
+							neighbor.z < 0 || neighbor.z >= z_res) {
+							continue;
+						}
+
+						size_t neighborIndex = neighbor.x + neighbor.y * x_res + neighbor.z * x_res * y_res;
+
+						// If neighbor is inside a voxel, get the voxel index
+						if (backgroundDensities[neighborIndex] > 0.0f) {
+							int voxelIndex = backgroundCollisions[neighborIndex];
+							if (voxelIndex >= 0 && voxelIndex < static_cast<int>(v.voxel_centres.size())) {
+								voxelsToBlacken[voxelIndex] = true;
+							}
+						}
+					}
+				}
 			}
 		}
 	}
 
+	// Blacken the marked voxels
+	int blackenedCount = 0;
+	for (size_t i = 0; i < voxelsToBlacken.size(); i++) {
+		if (voxelsToBlacken[i]) {
+			// Blacken the voxel (make it darker)
+			float darkenFactor = 0.3f; // 0.3 = 70% darker
+			v.voxel_colours[i].r *= darkenFactor;
+			v.voxel_colours[i].g *= darkenFactor;
+			v.voxel_colours[i].b *= darkenFactor;
+			v.voxel_colours[i].a = 1.0f;
+			blackenedCount++;
+		}
+	}
 
+	// Update the triangle mesh to reflect the new colors
+	vo.tri_vec.clear();
+	get_triangles(vo.tri_vec, vo);
+	updateTriangleBuffer(vo);
+
+	cout << "Blackened " << blackenedCount << " voxels neighboring fluid surface points" << endl;
 }
 
 

@@ -7,90 +7,12 @@
 // Uses OpenGL 4.3 Compute Shaders, GLEW, GLUT, GLM
 // ============================================================================
 
-// Vertex structure for shader compatibility
-struct RenderVertex {
-    float position[3];
-    float color[3];
-};
 
-// GPU Buffer handles
-GLuint computeProgram = 0;
-GLuint surfaceComputeProgram = 0;
-
-// SSBOs for compute shader
-GLuint voxelCentresSSBO = 0;
-GLuint voxelDensitiesSSBO = 0;
-GLuint gridMinMaxSSBO = 0;
-GLuint backgroundDensitiesSSBO = 0;
-GLuint backgroundCollisionsSSBO = 0;
-GLuint surfaceDensitiesSSBO = 0;
-GLuint voGridCellsSSBO = 0;
-
-// Persistent render buffers
-GLuint triangleVAO = 0, triangleVBO = 0, triangleEBO = 0;
-GLuint pointVAO = 0, pointVBO = 0;
-GLuint axisVAO = 0, axisVBO = 0;
-GLuint renderProgram = 0;
-
-bool gpuInitialized = false;
-size_t numSurfacePoints = 0;
 
 // ============================================================================
 // FLUID SIMULATION - New Variables
 // ============================================================================
 
-// Fluid simulation parameters
-struct FluidParams {
-    float dt = 0.016f;              // Time step (~60 fps)
-    float viscosity = 0.0001f;      // Kinematic viscosity
-    float diffusion = 0.0001f;      // Density diffusion rate
-    int jacobiIterations = 40;      // Pressure solver iterations
-    float smagorinskyConst = 0.1f;  // Smagorinsky constant for LES turbulence
-    float densityAmount = 100.0f;   // Amount of density to inject
-    float velocityAmount = 1.0f;   // Amount of velocity to inject
-    float densityDissipation = 0.995f; // Density dissipation per frame
-    float velocityDissipation = 0.99f; // Velocity dissipation per frame
-};
-
-FluidParams fluidParams;
-bool fluidSimEnabled = true;
-bool fluidInitialized = false;
-
-// Fluid SSBOs
-GLuint velocitySSBO[2] = { 0, 0 };      // Double buffered velocity (vec4: vx, vy, vz, 0)
-GLuint densitySSBO[2] = { 0, 0 };       // Double buffered density
-GLuint pressureSSBO[2] = { 0, 0 };      // Double buffered pressure
-GLuint divergenceSSBO = 0;             // Divergence field
-GLuint obstacleSSBO = 0;               // Obstacle mask (1 = obstacle, 0 = fluid)
-GLuint turbulentViscositySSBO = 0;     // Smagorinsky turbulent viscosity
-
-// Fluid compute shader programs
-GLuint advectionProgram = 0;
-GLuint diffusionProgram = 0;
-GLuint divergenceProgram = 0;
-GLuint pressureProgram = 0;
-GLuint gradientSubtractProgram = 0;
-GLuint boundaryProgram = 0;
-GLuint addSourceProgram = 0;
-GLuint turbulenceProgram = 0;
-GLuint obstacleProgram = 0;
-GLuint visualizeProgram = 0;
-
-int currentBuffer = 0;  // For double buffering
-
-// Mouse interaction
-bool injectDensity = false;
-bool injectVelocity = false;
-glm::vec3 lastMouseWorldPos(0.0f);
-glm::vec3 currentMouseWorldPos(0.0f);
-glm::vec3 mouseVelocity(0.0f);
-int injectRadius = 3;
-
-// Fluid visualization
-GLuint fluidVAO = 0, fluidVBO = 0;
-GLuint fluidRenderProgram = 0;
-size_t numFluidPoints = 0;
-float densityThreshold = 0.01f;
 
 // ============================================================================
 // Compute Shader Sources - Original
@@ -1692,52 +1614,6 @@ void updateSurfacePointsForRendering(voxel_object& v) {
 }
 
 // ============================================================================
-// Update triangle buffer for rendering
-// ============================================================================
-
-size_t numTriangleIndices = 0;
-
-void updateTriangleBuffer(voxel_object& v) {
-    if (!gpuInitialized) return;
-
-    vector<RenderVertex> vertices;
-    vector<GLuint> indices;
-
-    for (size_t i = 0; i < v.tri_vec.size(); i++) {
-        for (size_t j = 0; j < 3; j++) {
-            RenderVertex rv;
-            rv.position[0] = v.tri_vec[i].vertex[j].x;
-            rv.position[1] = v.tri_vec[i].vertex[j].y;
-            rv.position[2] = v.tri_vec[i].vertex[j].z;
-            rv.color[0] = v.tri_vec[i].colour.x;
-            rv.color[1] = v.tri_vec[i].colour.y;
-            rv.color[2] = v.tri_vec[i].colour.z;
-            vertices.push_back(rv);
-            indices.push_back(static_cast<GLuint>(vertices.size() - 1));
-        }
-    }
-
-    numTriangleIndices = indices.size();
-
-    glBindVertexArray(triangleVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, triangleVBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex),
-        vertices.empty() ? nullptr : vertices.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, triangleEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
-        indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-}
-
-// ============================================================================
 // Optimized Drawing Functions
 // ============================================================================
 
@@ -1999,6 +1875,14 @@ void keyboard_func(unsigned char key, int x, int y)
 {
     switch (tolower(key))
     {
+    case 'b':  // Blacken voxels with fluid
+    {
+        do_blackening(vo);
+        cout << "Blackened voxels neighboring fluid surface points" << endl;
+        break;
+    }
+
+
     case 'm':
         take_screenshot(4, "out.tga");
         break;
