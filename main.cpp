@@ -1092,42 +1092,43 @@ void main()
     vec4 color = vec4(0.0);
     float transmittance = 1.0;
 
-    for (int i = 0; i < maxSteps && t < texit; ++i)
-    {
-        vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
+for (int i = 0; i < maxSteps && t < texit; ++i)
+{
+    vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
 
-        float obs = texture(obstacleTex, uvw).r;
-        if (obs > 0.5) {
-            t += stepSize * 2.0;
-            pos = rayOrigin + rayDir * t;
-            continue;
-        }
-
-        float density = texture(densityTex, uvw).r;
-        float temp = texture(temperatureTex, uvw).r;
-
-        float sampleValue = visualizeTemperature ?
-            max(temp - temperatureThreshold, 0.0) : density;
-
-        if (sampleValue > 0.01)
-        {
-            float absorption = densityFactor * sampleValue * stepSize;
-            vec3 emitColor = visualizeTemperature ?
-                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);
-
-            vec3 absorbed = exp(-absorption * vec3(1.0));
-            vec3 contrib = (1.0 - absorbed) * emitColor;
-
-            color.rgb += transmittance * contrib;
-            color.a += (1.0 - absorbed.x) * transmittance;
-            transmittance *= absorbed.x;
-        }
-
-        t += stepSize;
-        pos = rayOrigin + rayDir * t;
-
-        if (transmittance < 0.01) break;
+    float obs = texture(obstacleTex, uvw).r;
+    if (obs > 0.5) {
+        // Hit solid voxel obstacle - stop marching entirely
+        // Optional: tint with voxel color if you want solids visible through thin fluid
+        // But for pure occlusion, just break
+        break;
     }
+
+    float density = texture(densityTex, uvw).r;
+    float temp = texture(temperatureTex, uvw).r;
+
+    float sampleValue = visualizeTemperature ?
+        max(temp - temperatureThreshold, 0.0) : density;
+
+    if (sampleValue > 0.01)
+    {
+        float absorption = densityFactor * sampleValue * stepSize;
+        vec3 emitColor = visualizeTemperature ?
+            heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);  // smoke color
+
+        vec3 absorbed = exp(-absorption * vec3(1.0));
+        vec3 contrib = (1.0 - absorbed) * emitColor;
+
+        color.rgb += transmittance * contrib;
+        color.a += (1.0 - absorbed.x) * transmittance;
+        transmittance *= absorbed.x;
+
+        if (transmittance < 0.01) break;  // early termination for opacity
+    }
+
+    t += stepSize;
+    pos = rayOrigin + rayDir * t;
+}
 
     color.rgb += transmittance * vec3(0.1, 0.15, 0.2); // Ambient background
     FragColor = color;
@@ -2179,7 +2180,7 @@ void reshape_func(int width, int height)
 void draw_objects(void)
 {
     // Draw surface points (voxel boundaries)
-    draw_points_fast();
+  //  draw_points_fast();
 
     // Draw triangles (voxel mesh)
     if (draw_triangles_on_screen) {
