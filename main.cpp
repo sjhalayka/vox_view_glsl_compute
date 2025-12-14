@@ -2075,6 +2075,11 @@ void take_screenshot(size_t num_cams_wide, const char* filename, const bool reve
             if (draw_triangles_on_screen) {
                 draw_triangles_fast(vo.model_matrix);
             }
+
+            if (fluidSimEnabled) {
+                draw_fluid_fast();
+            }
+
             if (draw_axis) {
                 draw_axis_fast();
             }
@@ -2198,7 +2203,7 @@ void draw_objects(void)
     }
 }
 
-// Timer callback for fluid simulation
+
 void fluid_timer_func(int value) {
     if (fluidSimEnabled && fluidInitialized) {
         // Step the fluid simulation
@@ -2213,13 +2218,15 @@ void fluid_timer_func(int value) {
 
         // Update visualization
         updateFluidVisualization();
+
+        do_blackening(vo);
+        updateBlackenColors(vo);
     }
 
     glutPostRedisplay();
-
-    // Continue timer (~60 fps)
     glutTimerFunc(16, fluid_timer_func, 0);
 }
+
 
 void display_func(void)
 {
@@ -2284,7 +2291,19 @@ void keyboard_func(unsigned char key, int x, int y)
                 glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
                 glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), ambientTemp.data());
             }
-            cout << "Fluid reset (including temperature)" << endl;
+
+            // Reset blackening state
+            if (!vo.voxel_original_colours.empty()) {
+                vo.voxel_colours = vo.voxel_original_colours;
+                fill(vo.voxel_blacken_times.begin(), vo.voxel_blacken_times.end(), -1.0f);
+                vo.tri_vec.clear();
+                get_triangles(vo.tri_vec, vo);
+                updateTriangleBuffer(vo);
+            }
+
+            simulationStartTime = std::chrono::steady_clock::now();  // Reset clock
+
+            cout << "Fluid reset (including temperature and blackening)" << endl;
         }
         break;
 

@@ -184,6 +184,27 @@ GLuint temperatureTexture = 0;
 GLuint obstacleTexture = 0;  // Optional: for better boundary handling
 
 
+
+// Blackening timing parameters
+float blackenDuration = 1.0f;  // Seconds from white to black
+std::chrono::steady_clock::time_point simulationStartTime;
+bool simulationTimeInitialized = false;
+
+// Helper to get elapsed time in seconds
+float getElapsedSeconds() {
+	if (!simulationTimeInitialized) {
+		simulationStartTime = std::chrono::steady_clock::now();
+		simulationTimeInitialized = true;
+	}
+	auto now = std::chrono::steady_clock::now();
+	return std::chrono::duration<float>(now - simulationStartTime).count();
+}
+
+
+
+
+
+
 void updateFluidTextures()
 {
 	if (!fluidInitialized) return;
@@ -364,6 +385,9 @@ public:
 
 
 	vector<glm::vec4> voxel_colours;
+	vector<glm::vec4> voxel_original_colours;  // Store original colors
+	vector<float> voxel_blacken_times;
+
 	size_t voxel_x_res;
 	size_t voxel_y_res;
 	size_t voxel_z_res;
@@ -916,11 +940,87 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 
 
 // Replace the do_blackening function with this corrected version
+// Color interpolation helper for blackening effect
+glm::vec4 getBlackenColor(float t, const glm::vec4& originalColor) {
+	// t goes from 0 (just blackened) to 1 (fully black)
+	t = glm::clamp(t, 0.0f, 1.0f);
+
+	// Color keyframes: white -> yellow -> orange -> red -> black
+	// We blend from original color through these stages
+	glm::vec4 white(1.0f, 1.0f, 1.0f, 1.0f);
+	glm::vec4 yellow(1.0f, 1.0f, 0.0f, 1.0f);
+	glm::vec4 orange(1.0f, 0.5f, 0.0f, 1.0f);
+	glm::vec4 red(1.0f, 0.0f, 0.0f, 1.0f);
+	glm::vec4 black(0.0f, 0.0f, 0.0f, 1.0f);
+
+	glm::vec4 targetColor;
+	if (t < 0.25f) {
+		// white -> yellow
+		float localT = t / 0.25f;
+		targetColor = glm::mix(white, yellow, localT);
+	}
+	else if (t < 0.5f) {
+		// yellow -> orange
+		float localT = (t - 0.25f) / 0.25f;
+		targetColor = glm::mix(yellow, orange, localT);
+	}
+	else if (t < 0.75f) {
+		// orange -> red
+		float localT = (t - 0.5f) / 0.25f;
+		targetColor = glm::mix(orange, red, localT);
+	}
+	else {
+		// red -> black
+		float localT = (t - 0.75f) / 0.25f;
+		targetColor = glm::mix(red, black, localT);
+	}
+
+	return targetColor;
+}
+
+void updateBlackenColors(voxel_object& v) {
+	bool anyChanged = false;
+	float currentSeconds = getElapsedSeconds();
+
+	for (size_t i = 0; i < v.voxel_blacken_times.size(); i++) {
+		if (v.voxel_blacken_times[i] >= 0.0f) {
+			float elapsed = currentSeconds - v.voxel_blacken_times[i];
+			float t = elapsed / blackenDuration;
+
+			glm::vec4 newColor = getBlackenColor(t, v.voxel_original_colours[i]);
+
+			if (v.voxel_colours[i] != newColor) {
+				v.voxel_colours[i] = newColor;
+				anyChanged = true;
+			}
+		}
+	}
+
+	if (anyChanged) {
+		v.tri_vec.clear();
+		get_triangles(v.tri_vec, v);
+		updateTriangleBuffer(v);
+	}
+}
+
+
+
+// Mark voxels for blackening (records timestamp, doesn't change color immediately)
 void do_blackening(voxel_object& v)
 {
 	if (!gpuInitialized) {
 		cout << "GPU not initialized!" << endl;
 		return;
+	}
+
+	// Initialize blacken_times if needed
+	if (v.voxel_blacken_times.empty()) {
+		v.voxel_blacken_times.resize(v.voxel_centres.size(), -1.0f);
+	}
+
+	// Store original colors if not already stored
+	if (v.voxel_original_colours.empty()) {
+		v.voxel_original_colours = v.voxel_colours;
 	}
 
 	// Read all necessary data from GPU
@@ -957,15 +1057,14 @@ void do_blackening(voxel_object& v)
 			fluidDensities.data());
 	}
 
-	// Track which voxels need to be blackened
-	vector<bool> voxelsToBlacken(v.voxel_centres.size(), false);
-
 	// Check all 6 neighbor directions
 	const ivec3 dirs[6] = {
 		ivec3(1, 0, 0), ivec3(-1, 0, 0),
 		ivec3(0, 1, 0), ivec3(0, -1, 0),
 		ivec3(0, 0, 1), ivec3(0, 0, -1)
 	};
+
+	int newlyBlackenedCount = 0;
 
 	// Process each grid point
 	for (size_t x = 0; x < x_res; x++)
@@ -984,9 +1083,7 @@ void do_blackening(voxel_object& v)
 				bool hasFluid = false;
 				if (!fluidDensities.empty()) {
 					float fluidDensity = fluidDensities[index];
-
-					// Check if density is above threshold
-					if (fluidDensity > 0.1f) { // Adjust threshold as needed
+					if (fluidDensity > 0.1f) {
 						hasFluid = true;
 					}
 				}
@@ -1011,7 +1108,11 @@ void do_blackening(voxel_object& v)
 						if (backgroundDensities[neighborIndex] > 0.0f) {
 							int voxelIndex = backgroundCollisions[neighborIndex];
 							if (voxelIndex >= 0 && voxelIndex < static_cast<int>(v.voxel_centres.size())) {
-								voxelsToBlacken[voxelIndex] = true;
+								// Only mark if not already blackening
+								if (v.voxel_blacken_times[voxelIndex] < 0.0f) {
+									v.voxel_blacken_times[voxelIndex] = getElapsedSeconds();
+									newlyBlackenedCount++;
+								}
 							}
 						}
 					}
@@ -1020,28 +1121,13 @@ void do_blackening(voxel_object& v)
 		}
 	}
 
-	// Blacken the marked voxels
-	int blackenedCount = 0;
-	for (size_t i = 0; i < voxelsToBlacken.size(); i++) {
-		if (voxelsToBlacken[i]) {
-			// Blacken the voxel (make it darker)
-			float darkenFactor = 0.3f; // 0.3 = 70% darker
-			v.voxel_colours[i].r *= darkenFactor;
-			v.voxel_colours[i].g *= darkenFactor;
-			v.voxel_colours[i].b *= darkenFactor;
-			v.voxel_colours[i].a = 1.0f;
-			blackenedCount++;
-		}
+	// Update colors based on all blackening timestamps
+	updateBlackenColors(v);
+
+	if (newlyBlackenedCount > 0) {
+		cout << "Newly blackened " << newlyBlackenedCount << " voxels" << endl;
 	}
-
-	// Update the triangle mesh to reflect the new colors
-	vo.tri_vec.clear();
-	get_triangles(vo.tri_vec, vo);
-	updateTriangleBuffer(vo);
-
-	cout << "Blackened " << blackenedCount << " voxels neighboring fluid surface points" << endl;
 }
-
 
 
 #endif
