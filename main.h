@@ -103,6 +103,30 @@ struct FluidParams {
 	float velocityAmount = 1.0f;   // Amount of velocity to inject
 	float densityDissipation = 0.995f; // Density dissipation per frame
 	float velocityDissipation = 0.99f; // Velocity dissipation per frame
+
+	// ============================================================================
+	// NEW: Temperature, Buoyancy, and Gravity Parameters
+	// ============================================================================
+	float ambientTemperature = 0.0f;      // Background/ambient temperature
+	float temperatureAmount = 10.0f;      // Temperature injection amount when adding source
+	float temperatureDissipation = 0.99f; // Temperature dissipation per frame (cooling)
+
+	// Buoyancy parameters (Boussinesq approximation)
+	// F_buoy = (-buoyancyAlpha * density + buoyancyBeta * (T - T_ambient)) * up
+	float buoyancyAlpha = 0.05f;          // Density buoyancy factor (dense fluid sinks)
+	float buoyancyBeta = 1.0f;            // Temperature buoyancy factor (hot fluid rises)
+
+	// Gravity
+	float gravity = 9.81f;                // Gravity magnitude (applied in -Y direction)
+	glm::vec3 gravityDirection = glm::vec3(0.0f, -1.0f, 0.0f); // Gravity direction (default: down)
+
+	// Feature toggles
+	bool enableGravity = false;           // Toggle gravity on/off (off by default for smoke)
+	bool enableBuoyancy = true;           // Toggle buoyancy on/off
+	bool enableTemperature = true;        // Toggle temperature field
+
+	// Visualization
+	bool visualizeTemperature = false;    // Show temperature instead of density
 };
 
 FluidParams fluidParams;
@@ -117,6 +141,11 @@ GLuint divergenceSSBO = 0;             // Divergence field
 GLuint obstacleSSBO = 0;               // Obstacle mask (1 = obstacle, 0 = fluid)
 GLuint turbulentViscositySSBO = 0;     // Smagorinsky turbulent viscosity
 
+// ============================================================================
+// NEW: Temperature SSBO
+// ============================================================================
+GLuint temperatureSSBO[2] = { 0, 0 };  // Double buffered temperature field
+
 // Fluid compute shader programs
 GLuint advectionProgram = 0;
 GLuint diffusionProgram = 0;
@@ -128,6 +157,11 @@ GLuint addSourceProgram = 0;
 GLuint turbulenceProgram = 0;
 GLuint obstacleProgram = 0;
 GLuint visualizeProgram = 0;
+
+// ============================================================================
+// NEW: Buoyancy compute shader program
+// ============================================================================
+GLuint buoyancyProgram = 0;
 
 int currentBuffer = 0;  // For double buffering
 
@@ -273,136 +307,131 @@ public:
 	// Find which voxel contains a point
 	bool find_voxel_containing_point(
 		const custom_math::vertex_3& point,
-		size_t& voxel_index) const 
+		size_t& voxel_index) const
 	{
 		// Get grid cell coordinates
-		int cell_x = static_cast<int>((point.x - vo_grid_min.x) / cell_size);
-		int cell_y = static_cast<int>((point.y - vo_grid_min.y) / cell_size);
-		int cell_z = static_cast<int>((point.z - vo_grid_min.z) / cell_size);
+		float cellSize = cell_size;
+
+		int cell_x = static_cast<int>(floor((point.x - vo_grid_min.x) / cellSize));
+		int cell_y = static_cast<int>(floor((point.y - vo_grid_min.y) / cellSize));
+		int cell_z = static_cast<int>(floor((point.z - vo_grid_min.z) / cellSize));
 
 		// Check bounds
-		if (cell_x < 0 || cell_x >= voxel_x_res ||
-			cell_y < 0 || cell_y >= voxel_y_res ||
-			cell_z < 0 || cell_z >= voxel_z_res) {
-			return false;  // Outside grid
+		if (cell_x < 0 || cell_x >= static_cast<int>(voxel_x_res) ||
+			cell_y < 0 || cell_y >= static_cast<int>(voxel_y_res) ||
+			cell_z < 0 || cell_z >= static_cast<int>(voxel_z_res)) {
+			return false;
 		}
 
 		// Find the index in the flattened 3D array
-		size_t cell_index = cell_x + (cell_y * voxel_x_res) + (cell_z * voxel_x_res * voxel_y_res);
+		size_t cellIndex = cell_x + cell_y * voxel_x_res + cell_z * voxel_x_res * voxel_y_res;
 
-		long long signed int voxel_idx = vo_grid_cells[cell_index];
+		if (cellIndex >= vo_grid_cells.size()) {
+			return false;
+		}
 
-		if (voxel_idx == -1)
-			return false;  // No voxel here
+		// Use the grid cells lookup to get actual voxel index
+		long long voxelIdx = vo_grid_cells[cellIndex];
 
-		// Do a precise check against the voxel
-		const float half_size = cell_size * 0.5f;
-		const custom_math::vertex_3& center = voxel_centres[voxel_idx];
+		if (voxelIdx == -1) {
+			return false;
+		}
 
-		if (point.x >= center.x - half_size &&
-			point.x <= center.x + half_size &&
-			point.y >= center.y - half_size &&
-			point.y <= center.y + half_size &&
-			point.z >= center.z - half_size &&
-			point.z <= center.z + half_size)
-		{
-			voxel_index = voxel_idx;
+		// Precise check against the voxel
+		float halfSize = cellSize * 0.5f;
+		const custom_math::vertex_3& center = voxel_centres[voxelIdx];
+
+		if (point.x >= center.x - halfSize && point.x <= center.x + halfSize &&
+			point.y >= center.y - halfSize && point.y <= center.y + halfSize &&
+			point.z >= center.z - halfSize && point.z <= center.z + halfSize) {
+			voxel_index = static_cast<size_t>(voxelIdx);
 			return true;
 		}
 
 		return false;
 	}
-
-
-	// Combine the grid with the model transformation
-	bool is_point_in_voxel_grid(const custom_math::vertex_3& test_point,
-		const glm::mat4& model,
-		size_t& voxel_index,
-		voxel_object& v) {
-		// 1. Calculate the inverse model matrix
-		glm::mat4 inv_model_matrix = glm::inverse(model);
-
-		// 2. Transform the test point with the inverse model matrix
-		glm::vec4 model_space_point(test_point.x, test_point.y, test_point.z, 1.0f);
-		glm::vec4 local_space_point = inv_model_matrix * model_space_point;
-
-		// 3. Create a vertex_3 from the transformed point
-		custom_math::vertex_3 transformed_point(
-			local_space_point.x,
-			local_space_point.y,
-			local_space_point.z
-		);
-
-		// 4. Use the grid to find the voxel
-		return find_voxel_containing_point(transformed_point, voxel_index);
-	}
-
-
-
-
 };
-
-
-
-
-
-
-
-
-
 
 voxel_object vo;
 
 
+void get_surface_points_GPU(voxel_object& v);
 
 
-//
-//void calc_AABB_min_max_locations(void)
-//{
-//	float x_min = numeric_limits<float>::max();
-//	float y_min = numeric_limits<float>::max();
-//	float z_min = numeric_limits<float>::max();
-//	float x_max = -numeric_limits<float>::max();
-//	float y_max = -numeric_limits<float>::max();
-//	float z_max = -numeric_limits<float>::max();
-//
-//	for (size_t t = 0; t < tri_vec.size(); t++)
-//	{
-//		for (size_t j = 0; j < 3; j++)
-//		{
-//			if (tri_vec[t].vertex[j].x < x_min)
-//				x_min = tri_vec[t].vertex[j].x;
-//
-//			if (tri_vec[t].vertex[j].x > x_max)
-//				x_max = tri_vec[t].vertex[j].x;
-//
-//			if (tri_vec[t].vertex[j].y < y_min)
-//				y_min = tri_vec[t].vertex[j].y;
-//
-//			if (tri_vec[t].vertex[j].y > y_max)
-//				y_max = tri_vec[t].vertex[j].y;
-//
-//			if (tri_vec[t].vertex[j].z < z_min)
-//				z_min = tri_vec[t].vertex[j].z;
-//
-//			if (tri_vec[t].vertex[j].z > z_max)
-//				z_max = tri_vec[t].vertex[j].z;
-//		}
-//	}
-//
-//	min_location.x = x_min;
-//	min_location.y = y_min;
-//	min_location.z = z_min;
-//
-//	max_location.x = x_max;
-//	max_location.y = y_max;
-//	max_location.z = z_max;
-//}
+// Define the coordinates for 6 adjacent neighbors (up, down, left, right, front, back)
+static const int directions[6][3] = {
+	{1, 0, 0}, {-1, 0, 0},  // x directions
+	{0, 1, 0}, {0, -1, 0},  // y directions
+	{0, 0, 1}, {0, 0, -1}   // z directions
+};
+
+// Initialize with the same grid size as background points
+//const size_t x_res = background_indices.empty() ? 0 : background_indices[background_indices.size() - 1].x + 1;
+//const size_t y_res = background_indices.empty() ? 0 : background_indices[background_indices.size() - 1].y + 1;
+//const size_t z_res = background_indices.empty() ? 0 : background_indices[background_indices.size() - 1].z + 1;
+
+// Clear any existing data
 
 
+void get_surface_points(void)
+{
 
 
-void centre_voxels_on_xyz(voxel_object &v)
+	//	std::cout << "Found " << background_surface_centres.size() << " surface points" << std::endl;
+}
+
+
+bool gpuInitialized = false;
+size_t numSurfacePoints = 0;
+
+// ============================================================================
+// Update triangle buffer for rendering
+// ============================================================================
+
+size_t numTriangleIndices = 0;
+
+void updateTriangleBuffer(voxel_object& v) {
+	if (!gpuInitialized) return;
+
+	vector<RenderVertex> vertices;
+	vector<GLuint> indices;
+
+	for (size_t i = 0; i < v.tri_vec.size(); i++) {
+		for (size_t j = 0; j < 3; j++) {
+			RenderVertex rv;
+			rv.position[0] = v.tri_vec[i].vertex[j].x;
+			rv.position[1] = v.tri_vec[i].vertex[j].y;
+			rv.position[2] = v.tri_vec[i].vertex[j].z;
+			rv.color[0] = v.tri_vec[i].colour.x;
+			rv.color[1] = v.tri_vec[i].colour.y;
+			rv.color[2] = v.tri_vec[i].colour.z;
+			vertices.push_back(rv);
+			indices.push_back(static_cast<GLuint>(vertices.size() - 1));
+		}
+	}
+
+	numTriangleIndices = indices.size();
+
+	glBindVertexArray(triangleVAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, triangleVBO);
+	glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex),
+		vertices.empty() ? nullptr : vertices.data(), GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, triangleEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
+		indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
+	glEnableVertexAttribArray(1);
+
+	glBindVertexArray(0);
+}
+
+
+void centre_voxels_on_xyz(voxel_object& v)
 {
 	float x_min = numeric_limits<float>::max();
 	float y_min = numeric_limits<float>::max();
@@ -442,76 +471,6 @@ void centre_voxels_on_xyz(voxel_object &v)
 		v.voxel_centres[t].z += -(z_max + z_min) / 2.0f;
 	}
 }
-
-
-bool write_triangles_to_binary_stereo_lithography_file(const vector<custom_math::triangle>& triangles, const char* const file_name)
-{
-	cout << "Triangle count: " << triangles.size() << endl;
-
-	if (0 == triangles.size())
-		return false;
-
-	// Write to file.
-	ofstream out(file_name, ios_base::binary);
-
-	if (out.fail())
-		return false;
-
-	const size_t header_size = 80;
-	vector<char> buffer(header_size, 0);
-	const unsigned int num_triangles = static_cast<unsigned int>(triangles.size()); // Must be 4-byte unsigned int.
-	custom_math::vertex_3 normal;
-
-	// Write blank header.
-	out.write(reinterpret_cast<const char*>(&(buffer[0])), header_size);
-
-	// Write number of triangles.
-	out.write(reinterpret_cast<const char*>(&num_triangles), sizeof(unsigned int));
-
-	// Copy everything to a single buffer.
-	cout << "Generating normal/vertex/attribute buffer" << endl;
-
-	// Enough bytes for twelve 4-byte floats plus one 2-byte integer, per triangle.
-	const size_t data_size = (12 * sizeof(float) + sizeof(short unsigned int)) * num_triangles;
-	buffer.resize(data_size, 0);
-
-	// Use a pointer to assist with the copying.
-	char* cp = &buffer[0];
-
-	for (vector<custom_math::triangle>::const_iterator i = triangles.begin(); i != triangles.end(); i++)
-	{
-		// Get face normal.
-		custom_math::vertex_3 v0 = i->vertex[1] - i->vertex[0];
-		custom_math::vertex_3 v1 = i->vertex[2] - i->vertex[0];
-		normal = v0.cross(v1);
-		normal.normalize();
-
-		memcpy(cp, &normal.x, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &normal.y, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &normal.z, sizeof(float)); cp += sizeof(float);
-
-		memcpy(cp, &i->vertex[0].x, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[0].y, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[0].z, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[1].x, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[1].y, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[1].z, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[2].x, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[2].y, sizeof(float)); cp += sizeof(float);
-		memcpy(cp, &i->vertex[2].z, sizeof(float)); cp += sizeof(float);
-
-		cp += sizeof(short unsigned int);
-	}
-
-	cout << "Writing " << data_size / 1048576.0f << " MB of data to binary Stereo Lithography file: " << file_name << endl;
-
-	out.write(reinterpret_cast<const char*>(&buffer[0]), data_size);
-	out.close();
-
-	return true;
-}
-
-
 
 bool get_voxels(const char* file_name, voxel_object& v)
 {
@@ -864,214 +823,6 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 
 
 
-//void index_to_xyz(const size_t index, const size_t x_res, const size_t y_res, size_t& x, size_t& y, size_t& z) 
-//{
-//	z = index / (x_res * y_res);
-//	
-//	const size_t remainder = index % (x_res * y_res);
-//
-//	y = remainder / x_res;
-//	x = remainder % x_res;
-//}
-
-
-void get_background_points(voxel_object& v)
-{
-	float x_grid_min = -x_grid_max;
-	float y_grid_min = -y_grid_max;
-	float z_grid_min = -z_grid_max;
-
-	v.background_indices.resize(x_res * y_res * z_res);
-	v.background_centres.resize(x_res * y_res * z_res);
-	v.background_densities.resize(x_res * y_res * z_res);
-	v.background_collisions.resize(x_res * y_res * z_res);
-
-	const float x_step_size = (x_grid_max - x_grid_min) / (x_res - 1);
-	const float y_step_size = (y_grid_max - y_grid_min) / (y_res - 1);
-	const float z_step_size = (z_grid_max - z_grid_min) / (z_res - 1);
-
-	custom_math::vertex_3 Z(x_grid_min, y_grid_min, x_grid_min);
-
-	for (size_t z = 0; z < z_res; z++, Z.z += z_step_size)
-	{
-		Z.x = x_grid_min;
-
-		for (size_t x = 0; x < x_res; x++, Z.x += x_step_size)
-		{
-			Z.y = y_grid_min;
-
-			for (size_t y = 0; y < y_res; y++, Z.y += y_step_size)
-			{
-				const custom_math::vertex_3 test_point(Z.x, Z.y, Z.z);
-
-				const size_t index = x + (y * x_res) + (z * x_res * y_res);
-
-				size_t voxel_index = 0;
-
-				v.background_centres[index] = test_point;
-				v.background_indices[index] = glm::ivec3(x, y, z);
-
-				if (v.is_point_in_voxel_grid(test_point, v.model_matrix, voxel_index, v))
-				{
-					v.background_densities[index] = 1.0;
-					v.background_collisions[index] = voxel_index;
-				}
-				else
-				{
-					v.background_densities[index] = 0.0;
-				}
-			}
-		}
-	}
-
-	// Define the coordinates for 6 adjacent neighbors (up, down, left, right, front, back)
-	static const int directions[6][3] = {
-		{1, 0, 0}, {-1, 0, 0},  // x directions
-		{0, 1, 0}, {0, -1, 0},  // y directions
-		{0, 0, 1}, {0, 0, -1}   // z directions
-	};
-
-	// Initialize with the same grid size as background points
-	//const size_t x_res = background_indices.empty() ? 0 : background_indices[background_indices.size() - 1].x + 1;
-	//const size_t y_res = background_indices.empty() ? 0 : background_indices[background_indices.size() - 1].y + 1;
-	//const size_t z_res = background_indices.empty() ? 0 : background_indices[background_indices.size() - 1].z + 1;
-
-	// Clear any existing data
-	v.background_surface_indices.clear();
-	v.background_surface_indices.resize(x_res * y_res * z_res);
-	v.background_surface_centres.clear();
-	v.background_surface_centres.resize(x_res * y_res * z_res);
-	v.background_surface_densities.clear();
-	v.background_surface_densities.resize(x_res * y_res * z_res);
-	v.background_surface_collisions.clear();
-	v.background_surface_collisions.resize(x_res * y_res * z_res);
-
-	// Check each point in the background grid
-	for (size_t i = 0; i < v.background_centres.size(); i++)
-	{
-		// Skip points that are already inside the voxel grid
-		if (v.background_densities[i] > 0)
-			continue;
-
-		// Get the grid coordinates for this point
-		const int x = v.background_indices[i].x;
-		const int y = v.background_indices[i].y;
-		const int z = v.background_indices[i].z;
-
-		const size_t index = x + (y * x_res) + (z * x_res * y_res);
-
-		// Check all 6 adjacent neighbors
-
-		bool is_surface = false;
-
-		for (int dir = 0; dir < 6; dir++)
-		{
-			const int nx = x + directions[dir][0];
-			const int ny = y + directions[dir][1];
-			const int nz = z + directions[dir][2];
-
-			// Skip if neighbor is outside the grid
-			if (nx < 0 || nx >= static_cast<int>(x_res) ||
-				ny < 0 || ny >= static_cast<int>(y_res) ||
-				nz < 0 || nz >= static_cast<int>(z_res))
-			{
-				continue;
-			}
-
-			// Calculate the index of the neighboring point
-			size_t neighbor_index = nx + (ny * x_res) + (nz * x_res * y_res);
-
-			// If the neighboring point is inside the voxel grid, this is a surface point
-			if (neighbor_index < v.background_densities.size() && v.background_densities[neighbor_index] > 0)
-			{
-				is_surface = true;
-
-				const size_t collision = v.background_collisions[neighbor_index];
-
-				v.background_surface_collisions[index].push_back(collision);
-			}
-		}
-
-
-		v.background_surface_indices[index] = v.background_indices[i];
-		v.background_surface_centres[index] = v.background_centres[i];
-
-		if (is_surface)
-		{
-			//cout << background_surface_collisions[index].size() << endl;
-			v.background_surface_densities[index] = 1.0;
-		}
-		else
-		{
-			v.background_surface_densities[index] = 0.0;
-		}
-	}
-
-
-}
-
-
-
-void get_surface_points(void)
-{
-
-
-//	std::cout << "Found " << background_surface_centres.size() << " surface points" << std::endl;
-}
-
-
-bool gpuInitialized = false;
-size_t numSurfacePoints = 0;
-
-// ============================================================================
-// Update triangle buffer for rendering
-// ============================================================================
-
-size_t numTriangleIndices = 0;
-
-void updateTriangleBuffer(voxel_object& v) {
-	if (!gpuInitialized) return;
-
-	vector<RenderVertex> vertices;
-	vector<GLuint> indices;
-
-	for (size_t i = 0; i < v.tri_vec.size(); i++) {
-		for (size_t j = 0; j < 3; j++) {
-			RenderVertex rv;
-			rv.position[0] = v.tri_vec[i].vertex[j].x;
-			rv.position[1] = v.tri_vec[i].vertex[j].y;
-			rv.position[2] = v.tri_vec[i].vertex[j].z;
-			rv.color[0] = v.tri_vec[i].colour.x;
-			rv.color[1] = v.tri_vec[i].colour.y;
-			rv.color[2] = v.tri_vec[i].colour.z;
-			vertices.push_back(rv);
-			indices.push_back(static_cast<GLuint>(vertices.size() - 1));
-		}
-	}
-
-	numTriangleIndices = indices.size();
-
-	glBindVertexArray(triangleVAO);
-
-	glBindBuffer(GL_ARRAY_BUFFER, triangleVBO);
-	glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RenderVertex),
-		vertices.empty() ? nullptr : vertices.data(), GL_STATIC_DRAW);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, triangleEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
-		indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
-
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
-	glEnableVertexAttribArray(1);
-
-	glBindVertexArray(0);
-}
-
-
-
-
 // Replace the do_blackening function with this corrected version
 void do_blackening(voxel_object& v)
 {
@@ -1122,7 +873,7 @@ void do_blackening(voxel_object& v)
 		ivec3(1, 0, 0), ivec3(-1, 0, 0),
 		ivec3(0, 1, 0), ivec3(0, -1, 0),
 		ivec3(0, 0, 1), ivec3(0, 0, -1)
-		};
+	};
 
 	// Process each grid point
 	for (size_t x = 0; x < x_res; x++)

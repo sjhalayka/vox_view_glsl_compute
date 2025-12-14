@@ -4,6 +4,7 @@
 // ============================================================================
 // GPU Compute Shader Implementation for Real-Time Voxel Grid Collision
 // with 3D Navier-Stokes Fluid Simulation
+// NOW WITH: Temperature, Buoyancy, and Gravity
 // Uses OpenGL 4.3 Compute Shaders, GLEW, GLUT, GLM
 // ============================================================================
 
@@ -409,6 +410,86 @@ void main() {
 }
 )";
 
+// ============================================================================
+// NEW: Buoyancy and Gravity Forces Compute Shader
+// ============================================================================
+const char* buoyancyComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(std430, binding = 0) buffer Velocity {
+    vec4 velocity[];
+};
+
+layout(std430, binding = 1) readonly buffer Density {
+    float density[];
+};
+
+layout(std430, binding = 2) readonly buffer Temperature {
+    float temperature[];
+};
+
+layout(std430, binding = 3) readonly buffer Obstacles {
+    float obstacles[];
+};
+
+uniform ivec3 gridRes;
+uniform float dt;
+uniform float ambientTemperature;
+uniform float buoyancyAlpha;  // Density coefficient (makes dense fluid sink)
+uniform float buoyancyBeta;   // Temperature coefficient (makes hot fluid rise)
+uniform float gravity;        // Gravity magnitude
+uniform vec3 gravityDirection; // Gravity direction (usually (0, -1, 0))
+uniform bool enableGravity;
+uniform bool enableBuoyancy;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    if (gid.x >= gridRes.x || gid.y >= gridRes.y || gid.z >= gridRes.z) {
+        return;
+    }
+    
+    uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
+    
+    // Skip obstacles
+    if (obstacles[index] > 0.5) {
+        return;
+    }
+    
+    vec3 vel = velocity[index].xyz;
+    vec3 force = vec3(0.0);
+    
+    // Up direction is opposite of gravity direction
+    vec3 upDirection = -normalize(gravityDirection);
+    
+    // Gravity: constant downward force
+    // F_gravity = g * gravityDirection
+    if (enableGravity) {
+        force += gravity * gravityDirection;
+    }
+    
+    // Buoyancy force (Boussinesq approximation)
+    // F_buoy = (-alpha * density + beta * (T - T_ambient)) * up
+    // - Dense fluid sinks (alpha term, negative contribution to upward force)
+    // - Hot fluid rises (beta term, positive contribution to upward force)
+    if (enableBuoyancy) {
+        float d = density[index];
+        float T = temperature[index];
+        
+        // Buoyancy: hot air rises, dense smoke sinks
+        float buoyancyForce = -buoyancyAlpha * d + buoyancyBeta * (T - ambientTemperature);
+        force += buoyancyForce * upDirection;
+    }
+    
+    // Apply forces: v += F * dt
+    vel += force * dt;
+    
+    velocity[index] = vec4(vel, 0.0);
+}
+)";
+
 // Smagorinsky LES turbulence model
 const char* turbulenceComputeShader = R"(
 #version 430 core
@@ -795,7 +876,9 @@ void main() {
 }
 )";
 
-// Add density/velocity source
+// ============================================================================
+// MODIFIED: Add density/velocity/temperature source
+// ============================================================================
 const char* addSourceComputeShader = R"(
 #version 430 core
 
@@ -813,6 +896,10 @@ layout(std430, binding = 2) readonly buffer Obstacles {
     float obstacles[];
 };
 
+layout(std430, binding = 3) buffer Temperature {
+    float temperature[];
+};
+
 uniform ivec3 gridRes;
 uniform vec3 gridMin;
 uniform vec3 gridMax;
@@ -821,8 +908,10 @@ uniform vec3 sourceVelocity;
 uniform float sourceRadius;
 uniform float densityAmount;
 uniform float velocityAmount;
+uniform float temperatureAmount;
 uniform bool addDensity;
 uniform bool addVelocity;
+uniform bool addTemperature;
 
 void main() {
     ivec3 gid = ivec3(gl_GlobalInvocationID);
@@ -857,6 +946,11 @@ void main() {
             vel += sourceVelocity * velocityAmount * falloff;
             velocity[index] = vec4(vel, 0.0);
         }
+        
+        // NEW: Add temperature with density injection
+        if (addTemperature) {
+            temperature[index] += temperatureAmount * falloff;
+        }
     }
 }
 )";
@@ -879,7 +973,12 @@ layout(std430, binding = 2) readonly buffer Obstacles {
     float obstacles[];
 };
 
+layout(std430, binding = 3) buffer Temperature {
+    float temperature[];
+};
+
 uniform ivec3 gridRes;
+uniform float ambientTemperature;
 
 void main() {
     ivec3 gid = ivec3(gl_GlobalInvocationID);
@@ -890,10 +989,11 @@ void main() {
     
     uint index = gid.x + gid.y * gridRes.x + gid.z * gridRes.x * gridRes.y;
     
-    // Zero velocity at obstacles
+    // Zero velocity and density at obstacles
     if (obstacles[index] > 0.5) {
         velocity[index] = vec4(0.0);
         density[index] = 0.0;
+        temperature[index] = ambientTemperature;
         return;
     }
     
@@ -1083,13 +1183,13 @@ void initGPUBuffers(voxel_object& v) {
 }
 
 // ============================================================================
-// FLUID SIMULATION - Initialization
+// FLUID SIMULATION - Initialization (MODIFIED for temperature)
 // ============================================================================
 
 void initFluidSimulation() {
     if (fluidInitialized) return;
 
-    cout << "Initializing fluid simulation..." << endl;
+    cout << "Initializing fluid simulation with temperature support..." << endl;
 
     // Compile fluid compute shaders
     advectionProgram = compileComputeShader(advectionComputeShader);
@@ -1103,12 +1203,15 @@ void initFluidSimulation() {
     turbulenceProgram = compileComputeShader(turbulenceComputeShader);
     obstacleProgram = compileComputeShader(obstacleComputeShader);
 
+    // NEW: Compile buoyancy program
+    buoyancyProgram = compileComputeShader(buoyancyComputeShader);
+
     // Store velocity advection program (we'll use it separately)
     static GLuint velAdvProg = velocityAdvectionProg;
 
     if (!advectionProgram || !diffusionProgram || !divergenceProgram ||
         !pressureProgram || !gradientSubtractProgram || !boundaryProgram ||
-        !addSourceProgram || !turbulenceProgram || !obstacleProgram) {
+        !addSourceProgram || !turbulenceProgram || !obstacleProgram || !buoyancyProgram) {
         cerr << "Failed to compile fluid simulation shaders!" << endl;
         return;
     }
@@ -1153,12 +1256,26 @@ void initFluidSimulation() {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, turbulentViscositySSBO);
     glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), zeroDensity.data(), GL_DYNAMIC_COPY);
 
+    // ========================================
+    // NEW: Initialize temperature buffers
+    // ========================================
+    vector<float> ambientTemp(gridSize, fluidParams.ambientTemperature);
+    for (int i = 0; i < 2; i++) {
+        glGenBuffers(1, &temperatureSSBO[i]);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, gridSize * sizeof(float), ambientTemp.data(), GL_DYNAMIC_COPY);
+    }
+    cout << "Temperature buffers initialized to ambient: " << fluidParams.ambientTemperature << endl;
+
     // Create fluid visualization VAO
     glGenVertexArrays(1, &fluidVAO);
     glGenBuffers(1, &fluidVBO);
 
     fluidInitialized = true;
-    cout << "Fluid simulation initialized successfully" << endl;
+    cout << "Fluid simulation initialized successfully with:" << endl;
+    cout << "  - Buoyancy: " << (fluidParams.enableBuoyancy ? "ON" : "OFF") << endl;
+    cout << "  - Gravity: " << (fluidParams.enableGravity ? "ON" : "OFF") << endl;
+    cout << "  - Temperature: " << (fluidParams.enableTemperature ? "ON" : "OFF") << endl;
 }
 
 // ============================================================================
@@ -1183,7 +1300,7 @@ void updateFluidObstacles() {
 }
 
 // ============================================================================
-// FLUID SIMULATION - Main Update Step
+// FLUID SIMULATION - Main Update Step (MODIFIED with buoyancy)
 // ============================================================================
 
 void stepFluidSimulation() {
@@ -1200,7 +1317,33 @@ void stepFluidSimulation() {
     int dst = 1 - currentBuffer;
 
     // ========================================
-    // 1. Apply turbulence (Smagorinsky LES)
+    // 1. Apply external forces (GRAVITY + BUOYANCY) - NEW!
+    // ========================================
+    if (fluidParams.enableGravity || fluidParams.enableBuoyancy) {
+        glUseProgram(buoyancyProgram);
+
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, densitySSBO[0]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, temperatureSSBO[0]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, obstacleSSBO);
+
+        glUniform3i(glGetUniformLocation(buoyancyProgram, "gridRes"), x_res, y_res, z_res);
+        glUniform1f(glGetUniformLocation(buoyancyProgram, "dt"), fluidParams.dt);
+        glUniform1f(glGetUniformLocation(buoyancyProgram, "ambientTemperature"), fluidParams.ambientTemperature);
+        glUniform1f(glGetUniformLocation(buoyancyProgram, "buoyancyAlpha"), fluidParams.buoyancyAlpha);
+        glUniform1f(glGetUniformLocation(buoyancyProgram, "buoyancyBeta"), fluidParams.buoyancyBeta);
+        glUniform1f(glGetUniformLocation(buoyancyProgram, "gravity"), fluidParams.gravity);
+        glUniform3fv(glGetUniformLocation(buoyancyProgram, "gravityDirection"), 1,
+            glm::value_ptr(fluidParams.gravityDirection));
+        glUniform1i(glGetUniformLocation(buoyancyProgram, "enableGravity"), fluidParams.enableGravity ? 1 : 0);
+        glUniform1i(glGetUniformLocation(buoyancyProgram, "enableBuoyancy"), fluidParams.enableBuoyancy ? 1 : 0);
+
+        glDispatchCompute(groupsX, groupsY, groupsZ);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    }
+
+    // ========================================
+    // 2. Apply turbulence (Smagorinsky LES)
     // ========================================
     glUseProgram(turbulenceProgram);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
@@ -1222,9 +1365,8 @@ void stepFluidSimulation() {
     std::swap(src, dst);
 
     // ========================================
-    // 2. Advect velocity (semi-Lagrangian)
+    // 3. Advect velocity (semi-Lagrangian)
     // ========================================
-    // We need to compile velocity advection shader separately
     static GLuint velAdvProg = 0;
     if (velAdvProg == 0) {
         velAdvProg = compileComputeShader(velocityAdvectionComputeShader);
@@ -1247,12 +1389,12 @@ void stepFluidSimulation() {
     std::swap(src, dst);
 
     // ========================================
-    // 3. Advect density
+    // 4. Advect density
     // ========================================
     glUseProgram(advectionProgram);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, densitySSBO[src]);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, densitySSBO[dst]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, densitySSBO[0]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, densitySSBO[1]);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, obstacleSSBO);
 
     glUniform3i(glGetUniformLocation(advectionProgram, "gridRes"), x_res, y_res, z_res);
@@ -1268,7 +1410,30 @@ void stepFluidSimulation() {
     std::swap(densitySSBO[0], densitySSBO[1]);
 
     // ========================================
-    // 4. Compute divergence
+    // 5. Advect temperature - NEW!
+    // ========================================
+    if (fluidParams.enableTemperature) {
+        glUseProgram(advectionProgram);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, temperatureSSBO[0]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, temperatureSSBO[1]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, obstacleSSBO);
+
+        glUniform3i(glGetUniformLocation(advectionProgram, "gridRes"), x_res, y_res, z_res);
+        glUniform3fv(glGetUniformLocation(advectionProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
+        glUniform3fv(glGetUniformLocation(advectionProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
+        glUniform1f(glGetUniformLocation(advectionProgram, "dt"), fluidParams.dt);
+        glUniform1f(glGetUniformLocation(advectionProgram, "dissipation"), fluidParams.temperatureDissipation);
+
+        glDispatchCompute(groupsX, groupsY, groupsZ);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+        // Swap temperature buffers
+        std::swap(temperatureSSBO[0], temperatureSSBO[1]);
+    }
+
+    // ========================================
+    // 6. Compute divergence
     // ========================================
     glUseProgram(divergenceProgram);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
@@ -1283,7 +1448,7 @@ void stepFluidSimulation() {
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     // ========================================
-    // 5. Solve pressure (Jacobi iteration)
+    // 7. Solve pressure (Jacobi iteration)
     // ========================================
     // Clear pressure
     size_t gridSize = x_res * y_res * z_res;
@@ -1314,7 +1479,7 @@ void stepFluidSimulation() {
     }
 
     // ========================================
-    // 6. Subtract pressure gradient
+    // 8. Subtract pressure gradient
     // ========================================
     glUseProgram(gradientSubtractProgram);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
@@ -1329,14 +1494,16 @@ void stepFluidSimulation() {
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     // ========================================
-    // 7. Apply boundary conditions
+    // 9. Apply boundary conditions
     // ========================================
     glUseProgram(boundaryProgram);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, densitySSBO[0]);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, temperatureSSBO[0]);
 
     glUniform3i(glGetUniformLocation(boundaryProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform1f(glGetUniformLocation(boundaryProgram, "ambientTemperature"), fluidParams.ambientTemperature);
 
     glDispatchCompute(groupsX, groupsY, groupsZ);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -1346,7 +1513,7 @@ void stepFluidSimulation() {
 }
 
 // ============================================================================
-// FLUID SIMULATION - Add Source (Mouse Interaction)
+// FLUID SIMULATION - Add Source (MODIFIED with temperature)
 // ============================================================================
 
 void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool addDens, bool addVel) {
@@ -1357,6 +1524,7 @@ void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool a
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, densitySSBO[0]);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, velocitySSBO[currentBuffer]);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, temperatureSSBO[0]);
 
     glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
     glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
@@ -1370,8 +1538,12 @@ void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool a
         (x_grid_max * 2.0f / x_res) * injectRadius);
     glUniform1f(glGetUniformLocation(addSourceProgram, "densityAmount"), fluidParams.densityAmount);
     glUniform1f(glGetUniformLocation(addSourceProgram, "velocityAmount"), fluidParams.velocityAmount);
+    glUniform1f(glGetUniformLocation(addSourceProgram, "temperatureAmount"), fluidParams.temperatureAmount);
     glUniform1i(glGetUniformLocation(addSourceProgram, "addDensity"), addDens ? 1 : 0);
     glUniform1i(glGetUniformLocation(addSourceProgram, "addVelocity"), addVel ? 1 : 0);
+    // Add temperature when adding density (for fire/smoke effect)
+    glUniform1i(glGetUniformLocation(addSourceProgram, "addTemperature"),
+        (addDens && fluidParams.enableTemperature) ? 1 : 0);
 
     GLuint groupsX = (x_res + 7) / 8;
     GLuint groupsY = (y_res + 7) / 8;
@@ -1381,7 +1553,7 @@ void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool a
 }
 
 // ============================================================================
-// FLUID SIMULATION - Visualization
+// FLUID SIMULATION - Visualization (MODIFIED with temperature option)
 // ============================================================================
 
 void updateFluidVisualization() {
@@ -1393,6 +1565,14 @@ void updateFluidVisualization() {
     vector<float> densities(gridSize);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[0]);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), densities.data());
+
+    // Read back temperature if visualizing it
+    vector<float> temperatures;
+    if (fluidParams.visualizeTemperature) {
+        temperatures.resize(gridSize);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[0]);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), temperatures.data());
+    }
 
     // Read back obstacles for exclusion
     vector<float> obstacles(gridSize);
@@ -1417,41 +1597,36 @@ void updateFluidVisualization() {
                 size_t idx = x + y * x_res + z * x_res * y_res;
 
                 // Skip obstacles
-                if (obstacles[idx] > 0.5f)
-                {
+                if (obstacles[idx] > 0.5f) {
                     continue;
-
-                    //RenderVertex rv;
-                    //rv.position[0] = x_grid_min + x * x_step;
-                    //rv.position[1] = y_grid_min + y * y_step;
-                    //rv.position[2] = z_grid_min + z * z_step;
-
-                    //// Color based on density (blue to red heat map)
-                    //float d = std::min(densities[idx] / 50.0f, 1.0f);
-                    //rv.color[0] = 1.0f;                    // Red
-                    //rv.color[1] = 1.0f;    // Green
-                    //rv.color[2] = 1.0f;             // Blue
-
-                    //fluidVertices.push_back(rv);
-
                 }
-                else
-                {
-                    // Only show cells with density above threshold
-                    if (densities[idx] > densityThreshold) {
-                        RenderVertex rv;
-                        rv.position[0] = x_grid_min + x * x_step;
-                        rv.position[1] = y_grid_min + y * y_step;
-                        rv.position[2] = z_grid_min + z * z_step;
 
-                        // Color based on density (blue to red heat map)
+                // Only show cells with density above threshold
+                if (densities[idx] > densityThreshold) {
+                    RenderVertex rv;
+                    rv.position[0] = x_grid_min + x * x_step;
+                    rv.position[1] = y_grid_min + y * y_step;
+                    rv.position[2] = z_grid_min + z * z_step;
+
+                    if (fluidParams.visualizeTemperature && !temperatures.empty()) {
+                        // Temperature visualization: cold (blue) -> hot (red/yellow)
+                        float t = std::min(temperatures[idx] / 20.0f, 1.0f); // Normalize temperature
+                        float d = std::min(densities[idx] / 50.0f, 1.0f);
+
+                        // Hot = orange/yellow, cold = blue/cyan
+                        rv.color[0] = t;                          // Red increases with temp
+                        rv.color[1] = t * 0.5f;                   // Some green for yellow
+                        rv.color[2] = (1.0f - t) * d;             // Blue decreases with temp
+                    }
+                    else {
+                        // Standard density visualization (blue to red heat map)
                         float d = std::min(densities[idx] / 50.0f, 1.0f);
                         rv.color[0] = d;                    // Red
                         rv.color[1] = 0.2f * (1.0f - d);    // Green
                         rv.color[2] = 1.0f - d;             // Blue
-
-                        fluidVertices.push_back(rv);
                     }
+
+                    fluidVertices.push_back(rv);
                 }
             }
         }
@@ -1803,7 +1978,7 @@ void init_opengl(const int& width, const int& height)
     glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE | GLUT_DEPTH);
     glutInitWindowPosition(0, 0);
     glutInitWindowSize(win_x, win_y);
-    win_id = glutCreateWindow("GPU Fluid Simulation with Voxel Obstacles");
+    win_id = glutCreateWindow("GPU Fluid Simulation with Temperature, Buoyancy & Gravity");
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -1929,6 +2104,7 @@ void keyboard_func(unsigned char key, int x, int y)
         if (fluidInitialized) {
             size_t gridSize = x_res * y_res * z_res;
             vector<float> zeroDensity(gridSize, 0.0f);
+            vector<float> ambientTemp(gridSize, fluidParams.ambientTemperature);
             vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
 
             for (int i = 0; i < 2; i++) {
@@ -1937,8 +2113,12 @@ void keyboard_func(unsigned char key, int x, int y)
 
                 glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
                 glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(glm::vec4), zeroVelocity.data());
+
+                // Reset temperature to ambient
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), ambientTemp.data());
             }
-            cout << "Fluid reset" << endl;
+            cout << "Fluid reset (including temperature)" << endl;
         }
         break;
 
@@ -1970,6 +2150,68 @@ void keyboard_func(unsigned char key, int x, int y)
     case '.':
         injectRadius = std::min(10, injectRadius + 1);
         cout << "Injection radius: " << injectRadius << endl;
+        break;
+
+        // ========================================
+        // NEW: Temperature and Buoyancy Controls
+        // ========================================
+
+        // Toggle gravity
+    case 'g':
+        fluidParams.enableGravity = !fluidParams.enableGravity;
+        cout << "Gravity: " << (fluidParams.enableGravity ? "ON" : "OFF") << endl;
+        break;
+
+        // Toggle buoyancy
+    case 'y':
+        fluidParams.enableBuoyancy = !fluidParams.enableBuoyancy;
+        cout << "Buoyancy: " << (fluidParams.enableBuoyancy ? "ON" : "OFF") << endl;
+        break;
+
+        // Toggle temperature visualization
+    case 'v':
+        fluidParams.visualizeTemperature = !fluidParams.visualizeTemperature;
+        cout << "Visualize temperature: " << (fluidParams.visualizeTemperature ? "ON" : "OFF") << endl;
+        break;
+
+        // Adjust buoyancy alpha (density sinking)
+    case '1':
+        fluidParams.buoyancyAlpha = std::max(0.0f, fluidParams.buoyancyAlpha - 0.01f);
+        cout << "Buoyancy Alpha (density): " << fluidParams.buoyancyAlpha << endl;
+        break;
+    case '2':
+        fluidParams.buoyancyAlpha = std::min(1.0f, fluidParams.buoyancyAlpha + 0.01f);
+        cout << "Buoyancy Alpha (density): " << fluidParams.buoyancyAlpha << endl;
+        break;
+
+        // Adjust buoyancy beta (temperature rising)
+    case '3':
+        fluidParams.buoyancyBeta = std::max(0.0f, fluidParams.buoyancyBeta - 0.1f);
+        cout << "Buoyancy Beta (temperature): " << fluidParams.buoyancyBeta << endl;
+        break;
+    case '4':
+        fluidParams.buoyancyBeta = std::min(5.0f, fluidParams.buoyancyBeta + 0.1f);
+        cout << "Buoyancy Beta (temperature): " << fluidParams.buoyancyBeta << endl;
+        break;
+
+        // Adjust temperature amount
+    case '5':
+        fluidParams.temperatureAmount = std::max(0.0f, fluidParams.temperatureAmount - 1.0f);
+        cout << "Temperature injection amount: " << fluidParams.temperatureAmount << endl;
+        break;
+    case '6':
+        fluidParams.temperatureAmount = std::min(50.0f, fluidParams.temperatureAmount + 1.0f);
+        cout << "Temperature injection amount: " << fluidParams.temperatureAmount << endl;
+        break;
+
+        // Adjust gravity strength
+    case '7':
+        fluidParams.gravity = std::max(0.0f, fluidParams.gravity - 1.0f);
+        cout << "Gravity: " << fluidParams.gravity << endl;
+        break;
+    case '8':
+        fluidParams.gravity = std::min(50.0f, fluidParams.gravity + 1.0f);
+        cout << "Gravity: " << fluidParams.gravity << endl;
         break;
 
     case 'o':
@@ -2072,6 +2314,15 @@ void keyboard_func(unsigned char key, int x, int y)
         cout << "[/]: Decrease/increase viscosity" << endl;
         cout << "-/=: Decrease/increase turbulence (Smagorinsky constant)" << endl;
         cout << ",/.: Decrease/increase injection radius" << endl;
+        cout << "\n=== NEW: TEMPERATURE & BUOYANCY ===" << endl;
+        cout << "G: Toggle gravity" << endl;
+        cout << "Y: Toggle buoyancy" << endl;
+        cout << "V: Toggle temperature visualization" << endl;
+        cout << "1/2: Decrease/increase buoyancy alpha (density sinking)" << endl;
+        cout << "3/4: Decrease/increase buoyancy beta (temperature rising)" << endl;
+        cout << "5/6: Decrease/increase temperature injection" << endl;
+        cout << "7/8: Decrease/increase gravity strength" << endl;
+        cout << "\n=== OTHER ===" << endl;
         cout << "O/P: Rotate voxel object Y-axis" << endl;
         cout << "K/L: Rotate voxel object X-axis" << endl;
         cout << "T: Toggle triangle mesh" << endl;
@@ -2189,6 +2440,9 @@ void cleanup(void)
         glDeleteBuffers(1, &obstacleSSBO);
         glDeleteBuffers(1, &turbulentViscositySSBO);
 
+        // NEW: Cleanup temperature buffers
+        glDeleteBuffers(2, temperatureSSBO);
+
         glDeleteVertexArrays(1, &fluidVAO);
         glDeleteBuffers(1, &fluidVBO);
 
@@ -2201,6 +2455,7 @@ void cleanup(void)
         if (addSourceProgram) glDeleteProgram(addSourceProgram);
         if (turbulenceProgram) glDeleteProgram(turbulenceProgram);
         if (obstacleProgram) glDeleteProgram(obstacleProgram);
+        if (buoyancyProgram) glDeleteProgram(buoyancyProgram);
     }
 
     glutDestroyWindow(win_id);
@@ -2269,15 +2524,23 @@ int main(int argc, char** argv)
     updateFluidObstacles();
 
     // Print controls
-    cout << "\n=== FLUID SIMULATION CONTROLS ===" << endl;
+    cout << "\n=== FLUID SIMULATION WITH TEMPERATURE, BUOYANCY & GRAVITY ===" << endl;
     cout << "F: Toggle fluid simulation" << endl;
     cout << "C: Clear/reset fluid" << endl;
-    cout << "Middle Mouse + Drag: Inject density and velocity" << endl;
-    cout << "Shift + Middle Mouse: Inject density only" << endl;
+    cout << "Middle Mouse + Drag: Inject density, velocity, and temperature" << endl;
+    cout << "Shift + Middle Mouse: Inject density and temperature only" << endl;
     cout << "[/]: Decrease/increase viscosity" << endl;
     cout << "-/=: Decrease/increase turbulence" << endl;
     cout << ",/.: Decrease/increase injection radius" << endl;
-    cout << "H: Show all controls" << endl;
+    cout << "\n--- Temperature & Buoyancy Controls ---" << endl;
+    cout << "G: Toggle gravity (currently " << (fluidParams.enableGravity ? "ON" : "OFF") << ")" << endl;
+    cout << "Y: Toggle buoyancy (currently " << (fluidParams.enableBuoyancy ? "ON" : "OFF") << ")" << endl;
+    cout << "V: Toggle temperature visualization" << endl;
+    cout << "1/2: Adjust buoyancy alpha (density)" << endl;
+    cout << "3/4: Adjust buoyancy beta (temperature)" << endl;
+    cout << "5/6: Adjust temperature injection amount" << endl;
+    cout << "7/8: Adjust gravity strength" << endl;
+    cout << "\nH: Show all controls" << endl;
     cout << "=================================\n" << endl;
 
     glutReshapeFunc(reshape_func);
