@@ -1047,10 +1047,10 @@ uniform vec3 gridMax = vec3(10.0, 10.0, 10.0);
 uniform ivec3 gridRes = ivec3(128, 128, 128);
 
 uniform bool visualizeTemperature = false;
-uniform float densityFactor = 20.0;
+uniform float densityFactor = 1.0;
 uniform float temperatureThreshold = 1.0;
 uniform float stepSize = 0.2;
-uniform int maxSteps = 256;
+uniform int maxSteps = 128;
 
 vec3 heatColor(float t)
 {
@@ -1092,43 +1092,43 @@ void main()
     vec4 color = vec4(0.0);
     float transmittance = 1.0;
 
-for (int i = 0; i < maxSteps && t < texit; ++i)
-{
-    vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
-
-    float obs = texture(obstacleTex, uvw).r;
-    if (obs > 0.5) {
-        // Hit solid voxel obstacle - stop marching entirely
-        // Optional: tint with voxel color if you want solids visible through thin fluid
-        // But for pure occlusion, just break
-        break;
-    }
-
-    float density = texture(densityTex, uvw).r;
-    float temp = texture(temperatureTex, uvw).r;
-
-    float sampleValue = visualizeTemperature ?
-        max(temp - temperatureThreshold, 0.0) : density;
-
-    if (sampleValue > 0.01)
+    for (int i = 0; i < maxSteps && t < texit; ++i)
     {
-        float absorption = densityFactor * sampleValue * stepSize;
-        vec3 emitColor = visualizeTemperature ?
-            heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);  // smoke color
+        vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
 
-        vec3 absorbed = exp(-absorption * vec3(1.0));
-        vec3 contrib = (1.0 - absorbed) * emitColor;
+        float obs = texture(obstacleTex, uvw).r;
+        if (obs > 0.5) {
+            // Hit solid voxel obstacle - stop marching entirely
+            // Optional: tint with voxel color if you want solids visible through thin fluid
+            // But for pure occlusion, just break
+            break;
+        }
 
-        color.rgb += transmittance * contrib;
-        color.a += (1.0 - absorbed.x) * transmittance;
-        transmittance *= absorbed.x;
+        float density = texture(densityTex, uvw).r;
+        float temp = texture(temperatureTex, uvw).r;
 
-        if (transmittance < 0.01) break;  // early termination for opacity
+        float sampleValue = visualizeTemperature ?
+            max(temp - temperatureThreshold, 0.0) : density;
+
+        if (sampleValue > 0.01)
+        {
+            float absorption = densityFactor * sampleValue * stepSize;
+            vec3 emitColor = visualizeTemperature ?
+                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);  // smoke color
+
+            vec3 absorbed = exp(-absorption * vec3(1.0));
+            vec3 contrib = (1.0 - absorbed) * emitColor;
+
+            color.rgb += transmittance * contrib;
+            color.a += (1.0 - absorbed.x) * transmittance;
+            transmittance *= absorbed.x;
+
+            if (transmittance < 0.01) break;  // early termination for opacity
+        }
+
+        t += stepSize;
+        pos = rayOrigin + rayDir * t;
     }
-
-    t += stepSize;
-    pos = rayOrigin + rayDir * t;
-}
 
     color.rgb += transmittance * vec3(0.1, 0.15, 0.2); // Ambient background
     FragColor = color;
