@@ -90,6 +90,8 @@ const float x_grid_max = 10;
 const float y_grid_max = 10;
 const float z_grid_max = 10;
 
+glm::vec3 knight_location = glm::vec3(10, 0, 0);
+glm::vec3 cat_location = glm::vec3(-10, 0, 0);
 
 
 // Fluid simulation parameters

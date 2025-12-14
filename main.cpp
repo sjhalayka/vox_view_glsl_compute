@@ -2403,6 +2403,8 @@ void keyboard_func(unsigned char key, int x, int y)
     {
         vo.u += 0.1f;
         vo.model_matrix = glm::mat4(1.0f);
+        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
@@ -2419,6 +2421,8 @@ void keyboard_func(unsigned char key, int x, int y)
     {
         vo.u -= 0.1f;
         vo.model_matrix = glm::mat4(1.0f);
+        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
@@ -2435,6 +2439,8 @@ void keyboard_func(unsigned char key, int x, int y)
     {
         vo.v += 0.1f;
         vo.model_matrix = glm::mat4(1.0f);
+        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
@@ -2451,6 +2457,8 @@ void keyboard_func(unsigned char key, int x, int y)
     {
         vo.v -= 0.1f;
         vo.model_matrix = glm::mat4(1.0f);
+        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
         vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
@@ -2476,6 +2484,8 @@ void keyboard_func(unsigned char key, int x, int y)
             glutTimerFunc(16, [](int) {
                 vo.u += 0.02f;
                 vo.model_matrix = glm::mat4(1.0f);
+                vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+
                 vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
                 vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
@@ -2682,6 +2692,10 @@ int main(int argc, char** argv)
     }
 
     vo.model_matrix = glm::mat4(1.0f);
+    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+
+
+
     get_voxels("chr_knight.vox", vo);
     get_triangles(vo.tri_vec, vo);
 
