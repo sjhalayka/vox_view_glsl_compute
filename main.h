@@ -1443,14 +1443,14 @@ const int NUM_ISO_LAYERS = 4;
 float isoValues[NUM_ISO_LAYERS] = { 0.1f, 0.3f, 0.5f, 0.8f };
 
 // Opacity for each layer (outer layers more transparent)
-float isoOpacities[NUM_ISO_LAYERS] = { 0.15f, 0.25f, 0.4f, 0.7f };
+float isoOpacities[NUM_ISO_LAYERS] = { 0.1f, 0.7f, 0.9f, 1.0f };// { 0.15f, 0.25f, 0.4f, 0.7f };
 
 // Colors for each layer (can be gradient from outer to inner)
 glm::vec4 isoColors[NUM_ISO_LAYERS] = {
-	glm::vec4(0.2f, 0.5f, 0.9f, 0.15f),  // Outer: light blue, very transparent
-	glm::vec4(0.3f, 0.6f, 0.9f, 0.25f),  // 
-	glm::vec4(0.5f, 0.7f, 0.95f, 0.4f),  //
-	glm::vec4(0.8f, 0.9f, 1.0f, 0.7f)    // Inner: white-ish, more opaque
+	glm::vec4(0.2f, 0.5f, 0.9f, isoOpacities[0]),  // Outer: light blue, very transparent
+	glm::vec4(0.0, 0.125, 0.25f, isoOpacities[1]),  // 
+	glm::vec4(1.0f, 0.0f, 0.0f, isoOpacities[2]),  //
+	glm::vec4(0.2f, 0.0f, 0.0f, isoOpacities[3])    // Inner: white-ish, more opaque
 };
 
 // Marching Cubes SSBOs

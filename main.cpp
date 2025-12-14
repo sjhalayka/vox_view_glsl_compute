@@ -222,8 +222,12 @@ uniform vec3 lightDir;
 out vec4 FragColor;
 
 void main() {
+
+    FragColor = layerColor;
+    return;
+
     vec3 normal = normalize(fragNormal);
-    
+
     // Simple directional lighting
     vec3 lightColor = vec3(1.0);
     float ambientStrength = 0.3;
