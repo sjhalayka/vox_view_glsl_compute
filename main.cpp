@@ -1,4 +1,4 @@
-#include "main.h"
+﻿#include "main.h"
 #include "shader_utils.h"
 
 // ============================================================================
@@ -1016,6 +1016,128 @@ void main() {
 }
 )";
 
+
+
+const char* volumeVertSource = R"(
+#version 430 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aTexCoord;
+out vec2 vTexCoord;
+
+void main()
+{
+    vTexCoord = aTexCoord;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+const char* volumeFragSource = R"(
+#version 430 core
+out vec4 FragColor;
+in vec2 vTexCoord;
+
+uniform sampler3D densityTex;
+uniform sampler3D temperatureTex;
+uniform sampler3D obstacleTex;
+
+uniform mat4 invViewProj;
+uniform vec3 cameraPos;
+uniform vec3 gridMin = vec3(-10.0, -10.0, -10.0);
+uniform vec3 gridMax = vec3(10.0, 10.0, 10.0);
+uniform ivec3 gridRes = ivec3(128, 128, 128);
+
+uniform bool visualizeTemperature = false;
+uniform float densityFactor = 20.0;
+uniform float temperatureThreshold = 1.0;
+uniform float stepSize = 0.2;
+uniform int maxSteps = 256;
+
+vec3 heatColor(float t)
+{
+    // Black -> Red -> Yellow -> White
+    return mix(mix(vec3(0.0), vec3(1.0,0.0,0.0), t),
+               mix(vec3(1.0,1.0,0.0), vec3(1.0,1.0,1.0), t*t), smoothstep(0.5, 1.0, t));
+}
+
+void main()
+{
+    // Ray origin and direction in world space
+    vec4 near = vec4(vTexCoord * 2.0 - 1.0, -1.0, 1.0);
+    vec4 far  = vec4(vTexCoord * 2.0 - 1.0,  1.0, 1.0);
+    vec4 nearWorld = invViewProj * near;
+    vec4 farWorld  = invViewProj * far;
+    nearWorld /= nearWorld.w;
+    farWorld  /= farWorld.w;
+
+    vec3 rayOrigin = nearWorld.xyz;
+    vec3 rayDir = normalize(farWorld.xyz - nearWorld.xyz);
+
+    // Bounding box intersection
+    vec3 invDir = 1.0 / rayDir;
+    vec3 t0 = (gridMin - rayOrigin) * invDir;
+    vec3 t1 = (gridMax - rayOrigin) * invDir;
+    vec3 tmin = min(t0, t1);
+    vec3 tmax = max(t0, t1);
+    float tenter = max(max(tmin.x, tmin.y), tmin.z);
+    float texit  = min(min(tmax.x, tmax.y), tmax.z);
+
+    if (tenter >= texit || texit < 0.0) {
+        discard;
+    }
+
+    tenter = max(tenter, 0.0);
+    float t = tenter;
+    vec3 pos = rayOrigin + rayDir * t;
+
+    vec4 color = vec4(0.0);
+    float transmittance = 1.0;
+
+    for (int i = 0; i < maxSteps && t < texit; ++i)
+    {
+        vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
+
+        float obs = texture(obstacleTex, uvw).r;
+        if (obs > 0.5) {
+            t += stepSize * 2.0;
+            pos = rayOrigin + rayDir * t;
+            continue;
+        }
+
+        float density = texture(densityTex, uvw).r;
+        float temp = texture(temperatureTex, uvw).r;
+
+        float sampleValue = visualizeTemperature ?
+            max(temp - temperatureThreshold, 0.0) : density;
+
+        if (sampleValue > 0.01)
+        {
+            float absorption = densityFactor * sampleValue * stepSize;
+            vec3 emitColor = visualizeTemperature ?
+                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);
+
+            vec3 absorbed = exp(-absorption * vec3(1.0));
+            vec3 contrib = (1.0 - absorbed) * emitColor;
+
+            color.rgb += transmittance * contrib;
+            color.a += (1.0 - absorbed.x) * transmittance;
+            transmittance *= absorbed.x;
+        }
+
+        t += stepSize;
+        pos = rayOrigin + rayDir * t;
+
+        if (transmittance < 0.01) break;
+    }
+
+    color.rgb += transmittance * vec3(0.1, 0.15, 0.2); // Ambient background
+    FragColor = color;
+}
+)";
+
+
+
+
+
 // Common vertex shader for all primitives
 const char* commonVertexShaderSource = R"(
 #version 430 core
@@ -1040,6 +1162,13 @@ void main() {
     finalColor = vec4(fragColor, 1.0);
 }
 )";
+
+
+
+
+
+
+
 
 // ============================================================================
 // Shader Compilation Helper
@@ -1205,6 +1334,11 @@ void initFluidSimulation() {
 
     // NEW: Compile buoyancy program
     buoyancyProgram = compileComputeShader(buoyancyComputeShader);
+
+
+    volumeRenderProgram = createShaderProgram(volumeVertSource, volumeFragSource);
+    initFullscreenQuad();
+
 
     // Store velocity advection program (we'll use it separately)
     static GLuint velAdvProg = velocityAdvectionProg;
@@ -1646,21 +1780,52 @@ void updateFluidVisualization() {
     glBindVertexArray(0);
 }
 
-void draw_fluid_fast() {
-    if (numFluidPoints == 0 || renderProgram == 0) return;
+void draw_fluid_fast()
+{
+    if (!fluidSimEnabled || !fluidInitialized) return;
 
-    glUseProgram(renderProgram);
+    updateFluidTextures();  // Copy SSBO → texture
 
-    glm::mat4 identity(1.0f);
-    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
-    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
-    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glPointSize(4.0f);
-    glBindVertexArray(fluidVAO);
-    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(numFluidPoints));
+    glUseProgram(volumeRenderProgram);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_3D, densityTexture);
+    glUniform1i(glGetUniformLocation(volumeRenderProgram, "densityTex"), 0);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, temperatureTexture);
+    glUniform1i(glGetUniformLocation(volumeRenderProgram, "temperatureTex"), 1);
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_3D, obstacleTexture);
+    glUniform1i(glGetUniformLocation(volumeRenderProgram, "obstacleTex"), 2);
+
+    glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
+    glm::mat4 invViewProj = glm::inverse(viewProj);
+
+    glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"), 1, GL_FALSE, &invViewProj[0][0]);
+    glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"), 1, &main_camera.eye.x);
+    glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
+    glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
+    glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"), fluidParams.visualizeTemperature ? 1 : 0);
+
+    glBindVertexArray(fullscreenVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
+
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
 }
+
+
+
+
+
 
 // ============================================================================
 // Mouse Ray Casting for 3D Position

@@ -108,7 +108,7 @@ struct FluidParams {
 	// NEW: Temperature, Buoyancy, and Gravity Parameters
 	// ============================================================================
 	float ambientTemperature = 0.0f;      // Background/ambient temperature
-	float temperatureAmount = 10.0f;      // Temperature injection amount when adding source
+	float temperatureAmount = 100.0f;      // Temperature injection amount when adding source
 	float temperatureDissipation = 0.99f; // Temperature dissipation per frame (cooling)
 
 	// Buoyancy parameters (Boussinesq approximation)
@@ -178,6 +178,98 @@ GLuint fluidVAO = 0, fluidVBO = 0;
 GLuint fluidRenderProgram = 0;
 size_t numFluidPoints = 0;
 float densityThreshold = 0.01f;
+
+GLuint densityTexture = 0;
+GLuint temperatureTexture = 0;
+GLuint obstacleTexture = 0;  // Optional: for better boundary handling
+
+
+void updateFluidTextures()
+{
+	if (!fluidInitialized) return;
+
+	int current = currentBuffer;  // or whichever buffer has latest data
+
+	// Update density texture
+	glActiveTexture(GL_TEXTURE0);
+	if (densityTexture == 0) {
+		glGenTextures(1, &densityTexture);
+		glBindTexture(GL_TEXTURE_3D, densityTexture);
+		glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, x_res, y_res, z_res, 0, GL_RED, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	}
+	glBindTexture(GL_TEXTURE_3D, densityTexture);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[current]);
+	void* ptr = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, x_res * y_res * z_res * sizeof(float),
+		GL_MAP_READ_BIT);
+	glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, x_res, y_res, z_res, GL_RED, GL_FLOAT, ptr);
+	glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+	// Update temperature texture
+	if (temperatureTexture == 0) {
+		glGenTextures(1, &temperatureTexture);
+		glBindTexture(GL_TEXTURE_3D, temperatureTexture);
+		glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, x_res, y_res, z_res, 0, GL_RED, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	}
+	glBindTexture(GL_TEXTURE_3D, temperatureTexture);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[current]);
+	ptr = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, x_res * y_res * z_res * sizeof(float),
+		GL_MAP_READ_BIT);
+	glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, x_res, y_res, z_res, GL_RED, GL_FLOAT, ptr);
+	glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+	// Optional: obstacle texture from obstacleSSBO
+	if (obstacleTexture == 0) {
+		glGenTextures(1, &obstacleTexture);
+		glBindTexture(GL_TEXTURE_3D, obstacleTexture);
+		glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, x_res, y_res, z_res, 0, GL_RED, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	}
+	glBindTexture(GL_TEXTURE_3D, obstacleTexture);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, obstacleSSBO);
+	ptr = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, x_res * y_res * z_res * sizeof(float), GL_MAP_READ_BIT);
+	glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, x_res, y_res, z_res, GL_RED, GL_FLOAT, ptr);
+	glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+}
+
+
+GLuint fullscreenVAO = 0, fullscreenVBO = 0;
+
+
+void initFullscreenQuad()
+{
+	float quadVertices[] = {
+		-1.0f, -1.0f, 0.0f, 0.0f,
+		 1.0f, -1.0f, 1.0f, 0.0f,
+		-1.0f,  1.0f, 0.0f, 1.0f,
+		 1.0f,  1.0f, 1.0f, 1.0f
+	};
+
+	glGenVertexArrays(1, &fullscreenVAO);
+	glGenBuffers(1, &fullscreenVBO);
+	glBindVertexArray(fullscreenVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, fullscreenVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+	glBindVertexArray(0);
+}
+
+GLuint volumeRenderProgram = 0;
+
+
 
 
 
