@@ -126,7 +126,7 @@ struct FluidParams {
 	bool enableTemperature = true;        // Toggle temperature field
 
 	// Visualization
-	bool visualizeTemperature = false;    // Show temperature instead of density
+	bool visualizeTemperature = true;    // Show temperature instead of density
 };
 
 FluidParams fluidParams;
