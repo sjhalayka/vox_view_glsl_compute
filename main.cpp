@@ -1055,7 +1055,7 @@ uniform int maxSteps = 256;
 vec3 heatColor(float t)
 {
     // Black -> Red -> Yellow -> White
-    return mix(mix(vec3(0.0), vec3(1.0,0.0,0.0), t),
+    return 5.0*mix(mix(vec3(0.0), vec3(1.0,0.0,0.0), t),
                mix(vec3(1.0,1.0,0.0), vec3(1.0,1.0,1.0), t*t), smoothstep(0.5, 1.0, t));
 }
 
