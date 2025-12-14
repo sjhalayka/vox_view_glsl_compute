@@ -1,23 +1,258 @@
 ﻿#include "main.h"
 #include "shader_utils.h"
 
-// ============================================================================
-// GPU Compute Shader Implementation for Real-Time Voxel Grid Collision
-// with 3D Navier-Stokes Fluid Simulation
-// NOW WITH: Temperature, Buoyancy, and Gravity
-// Uses OpenGL 4.3 Compute Shaders, GLEW, GLUT, GLM
-// ============================================================================
 
 
 
-// ============================================================================
-// FLUID SIMULATION - New Variables
-// ============================================================================
 
 
+
+const char* marchingCubesComputeShader = R"(
+#version 430 core
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+// Density field input
+layout(std430, binding = 0) readonly buffer DensityField {
+    float density[];
+};
+
+// Edge table (256 entries)
+layout(std430, binding = 1) readonly buffer EdgeTable {
+    int edgeTable[];
+};
+
+// Triangle table (256 * 16 entries, flattened)
+layout(std430, binding = 2) readonly buffer TriTable {
+    int triTable[];
+};
+
+// Output vertex buffer
+layout(std430, binding = 3) buffer VertexBuffer {
+    vec4 vertices[];
+};
+
+// Output normal buffer
+layout(std430, binding = 4) buffer NormalBuffer {
+    vec4 normals[];
+};
+
+// Atomic counter for vertex count
+layout(std430, binding = 5) buffer VertexCounter {
+    uint vertexCount;
+};
+
+uniform ivec3 gridRes;
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform float isoValue;
+uniform uint maxVertices;
+uniform uint vertexOffset;  // Offset into vertex buffer for this layer
+
+// Get density at grid position with bounds checking
+float getDensity(ivec3 p) {
+    p = clamp(p, ivec3(0), gridRes - ivec3(1));
+    uint idx = p.x + p.y * gridRes.x + p.z * gridRes.x * gridRes.y;
+    return density[idx];
+}
+
+// Compute gradient (normal) at a point using central differences
+vec3 computeGradient(vec3 worldPos, vec3 cellSize) {
+    vec3 gridPos = (worldPos - gridMin) / cellSize;
+    ivec3 p = ivec3(floor(gridPos));
+    
+    float dx = getDensity(p + ivec3(1,0,0)) - getDensity(p - ivec3(1,0,0));
+    float dy = getDensity(p + ivec3(0,1,0)) - getDensity(p - ivec3(0,1,0));
+    float dz = getDensity(p + ivec3(0,0,1)) - getDensity(p - ivec3(0,0,1));
+    
+    vec3 grad = vec3(dx, dy, dz);
+    float len = length(grad);
+    return len > 0.0001 ? grad / len : vec3(0.0, 1.0, 0.0);
+}
+
+// Interpolate vertex position along edge
+vec3 interpolateVertex(vec3 p1, vec3 p2, float v1, float v2) {
+    if (abs(isoValue - v1) < 0.00001) return p1;
+    if (abs(isoValue - v2) < 0.00001) return p2;
+    if (abs(v1 - v2) < 0.00001) return p1;
+    
+    float t = (isoValue - v1) / (v2 - v1);
+    t = clamp(t, 0.0, 1.0);
+    return mix(p1, p2, t);
+}
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    // Leave one cell margin for gradient computation
+    if (gid.x >= gridRes.x - 1 || gid.y >= gridRes.y - 1 || gid.z >= gridRes.z - 1) {
+        return;
+    }
+    
+    vec3 cellSize = (gridMax - gridMin) / vec3(gridRes - ivec3(1));
+    
+    // Get the 8 corner positions of this cell
+    vec3 p[8];
+    p[0] = gridMin + vec3(gid) * cellSize;
+    p[1] = p[0] + vec3(cellSize.x, 0.0, 0.0);
+    p[2] = p[0] + vec3(cellSize.x, cellSize.y, 0.0);
+    p[3] = p[0] + vec3(0.0, cellSize.y, 0.0);
+    p[4] = p[0] + vec3(0.0, 0.0, cellSize.z);
+    p[5] = p[0] + vec3(cellSize.x, 0.0, cellSize.z);
+    p[6] = p[0] + vec3(cellSize.x, cellSize.y, cellSize.z);
+    p[7] = p[0] + vec3(0.0, cellSize.y, cellSize.z);
+    
+    // Get density values at corners
+    float v[8];
+    v[0] = getDensity(gid);
+    v[1] = getDensity(gid + ivec3(1, 0, 0));
+    v[2] = getDensity(gid + ivec3(1, 1, 0));
+    v[3] = getDensity(gid + ivec3(0, 1, 0));
+    v[4] = getDensity(gid + ivec3(0, 0, 1));
+    v[5] = getDensity(gid + ivec3(1, 0, 1));
+    v[6] = getDensity(gid + ivec3(1, 1, 1));
+    v[7] = getDensity(gid + ivec3(0, 1, 1));
+    
+    // Compute cube index (which corners are inside the isosurface)
+    int cubeIndex = 0;
+    if (v[0] < isoValue) cubeIndex |= 1;
+    if (v[1] < isoValue) cubeIndex |= 2;
+    if (v[2] < isoValue) cubeIndex |= 4;
+    if (v[3] < isoValue) cubeIndex |= 8;
+    if (v[4] < isoValue) cubeIndex |= 16;
+    if (v[5] < isoValue) cubeIndex |= 32;
+    if (v[6] < isoValue) cubeIndex |= 64;
+    if (v[7] < isoValue) cubeIndex |= 128;
+    
+    // Early exit if cube is entirely inside or outside
+    int edges = edgeTable[cubeIndex];
+    if (edges == 0) return;
+    
+    // Compute edge vertices where surface intersects
+    vec3 edgeVerts[12];
+    
+    if ((edges & 1) != 0)    edgeVerts[0]  = interpolateVertex(p[0], p[1], v[0], v[1]);
+    if ((edges & 2) != 0)    edgeVerts[1]  = interpolateVertex(p[1], p[2], v[1], v[2]);
+    if ((edges & 4) != 0)    edgeVerts[2]  = interpolateVertex(p[2], p[3], v[2], v[3]);
+    if ((edges & 8) != 0)    edgeVerts[3]  = interpolateVertex(p[3], p[0], v[3], v[0]);
+    if ((edges & 16) != 0)   edgeVerts[4]  = interpolateVertex(p[4], p[5], v[4], v[5]);
+    if ((edges & 32) != 0)   edgeVerts[5]  = interpolateVertex(p[5], p[6], v[5], v[6]);
+    if ((edges & 64) != 0)   edgeVerts[6]  = interpolateVertex(p[6], p[7], v[6], v[7]);
+    if ((edges & 128) != 0)  edgeVerts[7]  = interpolateVertex(p[7], p[4], v[7], v[4]);
+    if ((edges & 256) != 0)  edgeVerts[8]  = interpolateVertex(p[0], p[4], v[0], v[4]);
+    if ((edges & 512) != 0)  edgeVerts[9]  = interpolateVertex(p[1], p[5], v[1], v[5]);
+    if ((edges & 1024) != 0) edgeVerts[10] = interpolateVertex(p[2], p[6], v[2], v[6]);
+    if ((edges & 2048) != 0) edgeVerts[11] = interpolateVertex(p[3], p[7], v[3], v[7]);
+    
+    // Generate triangles from the tri table
+    int triTableBase = cubeIndex * 16;
+    
+    for (int i = 0; triTable[triTableBase + i] != -1; i += 3) {
+        // Atomically allocate space for 3 vertices
+        uint baseIdx = atomicAdd(vertexCount, 3);
+        
+        // Check bounds
+        if (baseIdx + 2 >= maxVertices) return;
+        
+        // Add offset for this layer
+        baseIdx += vertexOffset;
+        
+        // Get triangle vertex indices
+        int e0 = triTable[triTableBase + i];
+        int e1 = triTable[triTableBase + i + 1];
+        int e2 = triTable[triTableBase + i + 2];
+        
+        vec3 v0 = edgeVerts[e0];
+        vec3 v1 = edgeVerts[e1];
+        vec3 v2 = edgeVerts[e2];
+        
+        // Compute face normal
+        vec3 edge1 = v1 - v0;
+        vec3 edge2 = v2 - v0;
+        vec3 faceNormal = normalize(cross(edge1, edge2));
+        
+        // Store vertices and normals
+        vertices[baseIdx]     = vec4(v0, 1.0);
+        vertices[baseIdx + 1] = vec4(v1, 1.0);
+        vertices[baseIdx + 2] = vec4(v2, 1.0);
+        
+        // Use gradient-based normals for smoother shading
+        normals[baseIdx]     = vec4(computeGradient(v0, cellSize), 0.0);
+        normals[baseIdx + 1] = vec4(computeGradient(v1, cellSize), 0.0);
+        normals[baseIdx + 2] = vec4(computeGradient(v2, cellSize), 0.0);
+    }
+}
+)";
+
 // ============================================================================
-// Compute Shader Sources - Original
+// MARCHING CUBES - Render Shaders (with transparency and lighting)
 // ============================================================================
+
+const char* mcVertexShaderSource = R"(
+#version 430 core
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+out vec3 fragPos;
+out vec3 fragNormal;
+
+void main() {
+    vec4 worldPos = model * vec4(position, 1.0);
+    fragPos = worldPos.xyz;
+    fragNormal = mat3(transpose(inverse(model))) * normal;
+    gl_Position = projection * view * worldPos;
+}
+)";
+
+const char* mcFragmentShaderSource = R"(
+#version 430 core
+
+in vec3 fragPos;
+in vec3 fragNormal;
+
+uniform vec3 viewPos;
+uniform vec4 layerColor;  // RGB + alpha
+uniform vec3 lightDir;
+
+out vec4 FragColor;
+
+void main() {
+    vec3 normal = normalize(fragNormal);
+    
+    // Simple directional lighting
+    vec3 lightColor = vec3(1.0);
+    float ambientStrength = 0.3;
+    vec3 ambient = ambientStrength * lightColor;
+    
+    // Diffuse - use abs for double-sided lighting
+    float diff = abs(dot(normal, normalize(-lightDir)));
+    vec3 diffuse = diff * lightColor;
+    
+    // Specular
+    vec3 viewDir = normalize(viewPos - fragPos);
+    vec3 reflectDir = reflect(normalize(lightDir), normal);
+    float spec = pow(max(abs(dot(viewDir, reflectDir)), 0.0), 32.0);
+    vec3 specular = 0.3 * spec * lightColor;
+    
+    vec3 lighting = ambient + diffuse + specular;
+    vec3 finalColor = lighting * layerColor.rgb;
+    
+    FragColor = vec4(finalColor, layerColor.a);
+}
+)";
+
+
+
+
+
+
+
+
 
 const char* backgroundPointsComputeShader = R"(
 #version 430 core
@@ -1341,6 +1576,9 @@ void initFluidSimulation() {
     initFullscreenQuad();
 
 
+    initMarchingCubes();
+
+
     // Store velocity advection program (we'll use it separately)
     static GLuint velAdvProg = velocityAdvectionProg;
 
@@ -1691,6 +1929,241 @@ void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool a
 // FLUID SIMULATION - Visualization (MODIFIED with temperature option)
 // ============================================================================
 
+// ============================================================================
+// MARCHING CUBES - Initialization Function
+// Add this to be called from initFluidSimulation() or initGPUBuffers()
+// ============================================================================
+
+void initMarchingCubes() {
+    cout << "Initializing Marching Cubes..." << endl;
+
+    // Compile compute shader
+    mcComputeProgram = compileComputeShader(marchingCubesComputeShader);
+    if (!mcComputeProgram) {
+        cerr << "Failed to compile Marching Cubes compute shader!" << endl;
+        return;
+    }
+
+    // Compile render shaders
+    mcRenderProgram = createShaderProgram(mcVertexShaderSource, mcFragmentShaderSource);
+    if (!mcRenderProgram) {
+        cerr << "Failed to compile Marching Cubes render shaders!" << endl;
+        return;
+    }
+
+    // Create edge table SSBO
+    glGenBuffers(1, &mcEdgeTableSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcEdgeTableSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 256 * sizeof(int), edgeTable, GL_STATIC_DRAW);
+
+    // Create triangle table SSBO (flattened 256 * 16)
+    vector<int> flatTriTable(256 * 16);
+    for (int i = 0; i < 256; i++) {
+        for (int j = 0; j < 16; j++) {
+            flatTriTable[i * 16 + j] = triTable[i][j];
+        }
+    }
+    glGenBuffers(1, &mcTriTableSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcTriTableSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, flatTriTable.size() * sizeof(int), flatTriTable.data(), GL_STATIC_DRAW);
+
+    // Create vertex counter SSBO
+    glGenBuffers(1, &mcVertexCountSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcVertexCountSSBO);
+    GLuint zero = 0;
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &zero, GL_DYNAMIC_DRAW);
+
+    // Create output vertex buffer (large enough for all layers)
+    size_t totalMaxVerts = MC_MAX_VERTICES * NUM_ISO_LAYERS;
+    glGenBuffers(1, &mcVertexBufferSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcVertexBufferSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, totalMaxVerts * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+
+    // Create output normal buffer
+    glGenBuffers(1, &mcNormalBufferSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcNormalBufferSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, totalMaxVerts * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+
+    // Create VAO for rendering
+    glGenVertexArrays(1, &mcVAO);
+    glBindVertexArray(mcVAO);
+
+    // Bind vertex buffer as VBO for rendering
+    glBindBuffer(GL_ARRAY_BUFFER, mcVertexBufferSSBO);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // Bind normal buffer
+    glBindBuffer(GL_ARRAY_BUFFER, mcNormalBufferSSBO);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), (void*)0);
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+
+    cout << "Marching Cubes initialized successfully" << endl;
+}
+
+// ============================================================================
+// MARCHING CUBES - Run compute shader for a single isovalue
+// ============================================================================
+
+void runMarchingCubes(float isoValue, int layerIndex) {
+    if (!mcComputeProgram || !fluidInitialized) return;
+
+    // Calculate vertex offset for this layer
+    GLuint vertexOffset = 0;
+    for (int i = 0; i < layerIndex; i++) {
+        vertexOffset += mcLayerVertexCounts[i];
+    }
+    mcLayerVertexOffsets[layerIndex] = vertexOffset;
+
+    // Reset vertex counter for this layer
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcVertexCountSSBO);
+    GLuint zero = 0;
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
+
+    glUseProgram(mcComputeProgram);
+
+    // Bind SSBOs
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, densitySSBO[currentBuffer]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, mcEdgeTableSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, mcTriTableSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, mcVertexBufferSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, mcNormalBufferSSBO);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, mcVertexCountSSBO);
+
+    // Set uniforms
+    glUniform3i(glGetUniformLocation(mcComputeProgram, "gridRes"), x_res, y_res, z_res);
+    glUniform3f(glGetUniformLocation(mcComputeProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
+    glUniform3f(glGetUniformLocation(mcComputeProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
+    glUniform1f(glGetUniformLocation(mcComputeProgram, "isoValue"), isoValue);
+    glUniform1ui(glGetUniformLocation(mcComputeProgram, "maxVertices"), MC_MAX_VERTICES);
+    glUniform1ui(glGetUniformLocation(mcComputeProgram, "vertexOffset"), vertexOffset);
+
+    // Dispatch compute shader
+    GLuint groupsX = (x_res + 3) / 4;
+    GLuint groupsY = (y_res + 3) / 4;
+    GLuint groupsZ = (z_res + 3) / 4;
+    glDispatchCompute(groupsX, groupsY, groupsZ);
+
+    // Wait for compute shader to finish
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+
+    // Read back vertex count for this layer
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mcVertexCountSSBO);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &mcLayerVertexCounts[layerIndex]);
+}
+
+// ============================================================================
+// MARCHING CUBES - Run all layers
+// ============================================================================
+
+void runAllMarchingCubesLayers() {
+    if (!mcComputeProgram) return;
+
+    // Run marching cubes for each isovalue layer
+    for (int i = 0; i < NUM_ISO_LAYERS; i++) {
+        runMarchingCubes(isoValues[i], i);
+    }
+}
+
+// ============================================================================
+// MARCHING CUBES - Draw all layer meshes with transparency
+// ============================================================================
+
+void drawMarchingCubesMesh() {
+    if (!mcRenderProgram || !mcVAO) return;
+
+    // Check if any vertices were generated
+    GLuint totalVerts = 0;
+    for (int i = 0; i < NUM_ISO_LAYERS; i++) {
+        totalVerts += mcLayerVertexCounts[i];
+    }
+    if (totalVerts == 0) return;
+
+    // Enable blending for transparency
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Disable depth writing for transparent objects (but keep depth test)
+    glDepthMask(GL_FALSE);
+
+    // Disable backface culling for double-sided rendering
+    glDisable(GL_CULL_FACE);
+
+    glUseProgram(mcRenderProgram);
+
+    // Set common uniforms
+    glm::mat4 model = glm::mat4(1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+    glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
+    glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
+    glUniform3fv(glGetUniformLocation(mcRenderProgram, "viewPos"), 1, &main_camera.eye.x);
+    glUniform3f(glGetUniformLocation(mcRenderProgram, "lightDir"), -0.5f, -1.0f, -0.3f);
+
+    glBindVertexArray(mcVAO);
+
+    // Draw layers from outer (most transparent) to inner (most opaque)
+    // This gives better transparency compositing
+    for (int i = 0; i < NUM_ISO_LAYERS; i++) {
+        if (mcLayerVertexCounts[i] == 0) continue;
+
+        // Set layer-specific color and opacity
+        glm::vec4 color = isoColors[i];
+
+        // If visualizing temperature, modify colors based on layer
+        if (fluidParams.visualizeTemperature) {
+            // Temperature gradient: blue (cold) -> white -> yellow -> red (hot)
+            float t = float(i) / float(NUM_ISO_LAYERS - 1);
+            if (t < 0.33f) {
+                color = glm::mix(glm::vec4(0.2f, 0.4f, 1.0f, isoOpacities[i]),
+                    glm::vec4(1.0f, 1.0f, 1.0f, isoOpacities[i]), t * 3.0f);
+            }
+            else if (t < 0.66f) {
+                color = glm::mix(glm::vec4(1.0f, 1.0f, 1.0f, isoOpacities[i]),
+                    glm::vec4(1.0f, 1.0f, 0.0f, isoOpacities[i]), (t - 0.33f) * 3.0f);
+            }
+            else {
+                color = glm::mix(glm::vec4(1.0f, 1.0f, 0.0f, isoOpacities[i]),
+                    glm::vec4(1.0f, 0.3f, 0.0f, isoOpacities[i]), (t - 0.66f) * 3.0f);
+            }
+        }
+
+        glUniform4fv(glGetUniformLocation(mcRenderProgram, "layerColor"), 1, glm::value_ptr(color));
+
+        // Draw this layer's triangles
+        GLint firstVertex = mcLayerVertexOffsets[i];
+        GLsizei vertexCount = mcLayerVertexCounts[i];
+        glDrawArrays(GL_TRIANGLES, firstVertex, vertexCount);
+    }
+
+    glBindVertexArray(0);
+
+    // Restore state
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+}
+
+// ============================================================================
+// MARCHING CUBES - Cleanup
+// Add to your cleanup() function
+// ============================================================================
+
+void cleanupMarchingCubes() {
+    if (mcComputeProgram) glDeleteProgram(mcComputeProgram);
+    if (mcRenderProgram) glDeleteProgram(mcRenderProgram);
+
+    glDeleteBuffers(1, &mcEdgeTableSSBO);
+    glDeleteBuffers(1, &mcTriTableSSBO);
+    glDeleteBuffers(1, &mcVertexCountSSBO);
+    glDeleteBuffers(1, &mcVertexBufferSSBO);
+    glDeleteBuffers(1, &mcNormalBufferSSBO);
+
+    glDeleteVertexArrays(1, &mcVAO);
+}
+
+
 void updateFluidVisualization() {
     if (!fluidInitialized) return;
 
@@ -1781,48 +2254,58 @@ void updateFluidVisualization() {
     glBindVertexArray(0);
 }
 
-void draw_fluid_fast()
-{
-    if (!fluidSimEnabled || !fluidInitialized) return;
+void draw_fluid_fast() {
+    if (!fluidInitialized) return;
 
-    updateFluidTextures();  // Copy SSBO → texture
+    // Update textures from SSBOs (still needed for the density data)
+    updateFluidTextures();
 
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (useMarchingCubes) {
+        // Run marching cubes on current density field
+        runAllMarchingCubesLayers();
 
-    glUseProgram(volumeRenderProgram);
+        // Draw the generated meshes
+        drawMarchingCubesMesh();
+    }
+    else {
+        // Original ray marching code (keep as fallback)
+        // ... your existing ray marching code here ...
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_3D, densityTexture);
-    glUniform1i(glGetUniformLocation(volumeRenderProgram, "densityTex"), 0);
+        glUseProgram(volumeRenderProgram);
 
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_3D, temperatureTexture);
-    glUniform1i(glGetUniformLocation(volumeRenderProgram, "temperatureTex"), 1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_3D, densityTexture);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "densityTex"), 0);
 
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_3D, obstacleTexture);
-    glUniform1i(glGetUniformLocation(volumeRenderProgram, "obstacleTex"), 2);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_3D, temperatureTexture);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "temperatureTex"), 1);
 
-    glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
-    glm::mat4 invViewProj = glm::inverse(viewProj);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_3D, obstacleTexture);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "obstacleTex"), 2);
 
-    glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"), 1, GL_FALSE, &invViewProj[0][0]);
-    glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"), 1, &main_camera.eye.x);
-    glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
-    glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
-    glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"), x_res, y_res, z_res);
-    glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"), fluidParams.visualizeTemperature ? 1 : 0);
+        glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
+        glm::mat4 invViewProj = glm::inverse(viewProj);
 
-    glBindVertexArray(fullscreenVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
+        glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"), 1, GL_FALSE, &invViewProj[0][0]);
+        glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"), 1, &main_camera.eye.x);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
+        glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"), x_res, y_res, z_res);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"), fluidParams.visualizeTemperature ? 1 : 0);
 
-    glEnable(GL_DEPTH_TEST);
-    glDisable(GL_BLEND);
+        glBindVertexArray(fullscreenVAO);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+    }
 }
-
 
 
 
@@ -2242,6 +2725,12 @@ void keyboard_func(unsigned char key, int x, int y)
 {
     switch (tolower(key))
     {
+    case 'i':  // Toggle between marching cubes and ray marching
+        useMarchingCubes = !useMarchingCubes;
+        cout << "Rendering mode: " << (useMarchingCubes ? "Marching Cubes" : "Ray Marching") << endl;
+        break;
+
+
     case 'b':  // Blacken voxels with fluid
     {
         do_blackening(vo);
@@ -2652,6 +3141,8 @@ void cleanup(void)
         if (obstacleProgram) glDeleteProgram(obstacleProgram);
         if (buoyancyProgram) glDeleteProgram(buoyancyProgram);
     }
+
+    cleanupMarchingCubes();
 
     glutDestroyWindow(win_id);
 }
