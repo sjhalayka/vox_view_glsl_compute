@@ -91,8 +91,34 @@ const float y_grid_max = 10;
 const float z_grid_max = 10;
 
 
-glm::vec3 knight_location = glm::vec3(0, 0, 0);
-glm::vec3 cat_location = glm::vec3(-10, 0, 0);
+// ============================================================================
+// MULTIPLE VOXEL OBJECTS SUPPORT
+// ============================================================================
+
+// Structure to hold voxel file info and location
+struct VoxelFileInfo {
+	std::string filename;
+	glm::vec3 location;
+};
+
+// List of voxel files to load with their locations
+// Add or remove entries here to change which voxel files are loaded
+std::vector<VoxelFileInfo> voxelFiles = {
+	{ "chr_knight.vox", glm::vec3(5, 0, 0) },
+	{ "chr_cat.vox", glm::vec3(-5, 0, 0) }
+};
+
+// Per-object GPU buffer handles
+struct VoxelObjectGPUData {
+	GLuint voxelCentresSSBO = 0;
+	GLuint voxelDensitiesSSBO = 0;
+	GLuint gridMinMaxSSBO = 0;
+	GLuint voGridCellsSSBO = 0;
+};
+
+std::vector<VoxelObjectGPUData> voxelObjectGPUData;
+
+
 
 
 // Fluid simulation parameters
@@ -471,7 +497,7 @@ public:
 	}
 };
 
-voxel_object vo;
+std::vector<voxel_object> voxel_objects;
 
 
 void get_surface_points_GPU(voxel_object& v);
@@ -509,23 +535,34 @@ size_t numSurfacePoints = 0;
 
 size_t numTriangleIndices = 0;
 
-void updateTriangleBuffer(voxel_object& v) {
+void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	if (!gpuInitialized) return;
 
 	vector<RenderVertex> vertices;
 	vector<GLuint> indices;
 
-	for (size_t i = 0; i < v.tri_vec.size(); i++) {
-		for (size_t j = 0; j < 3; j++) {
-			RenderVertex rv;
-			rv.position[0] = v.tri_vec[i].vertex[j].x;
-			rv.position[1] = v.tri_vec[i].vertex[j].y;
-			rv.position[2] = v.tri_vec[i].vertex[j].z;
-			rv.color[0] = v.tri_vec[i].colour.x;
-			rv.color[1] = v.tri_vec[i].colour.y;
-			rv.color[2] = v.tri_vec[i].colour.z;
-			vertices.push_back(rv);
-			indices.push_back(static_cast<GLuint>(vertices.size() - 1));
+	// Combine triangles from all voxel objects
+	for (auto& v : objects) {
+		for (size_t i = 0; i < v.tri_vec.size(); i++) {
+			for (size_t j = 0; j < 3; j++) {
+				RenderVertex rv;
+
+				// Transform vertices by model matrix
+				glm::vec4 worldPos = v.model_matrix * glm::vec4(
+					v.tri_vec[i].vertex[j].x,
+					v.tri_vec[i].vertex[j].y,
+					v.tri_vec[i].vertex[j].z,
+					1.0f);
+
+				rv.position[0] = worldPos.x;
+				rv.position[1] = worldPos.y;
+				rv.position[2] = worldPos.z;
+				rv.color[0] = v.tri_vec[i].colour.x;
+				rv.color[1] = v.tri_vec[i].colour.y;
+				rv.color[2] = v.tri_vec[i].colour.z;
+				vertices.push_back(rv);
+				indices.push_back(static_cast<GLuint>(vertices.size() - 1));
+			}
 		}
 	}
 
@@ -548,6 +585,13 @@ void updateTriangleBuffer(voxel_object& v) {
 
 	glBindVertexArray(0);
 }
+
+// Overload for single voxel object (backwards compatibility)
+void updateTriangleBuffer(voxel_object& v) {
+	std::vector<voxel_object> temp = { v };
+	updateTriangleBuffer(temp);
+}
+
 
 
 void centre_voxels_on_xyz(voxel_object& v)
@@ -1002,7 +1046,7 @@ void updateBlackenColors(voxel_object& v) {
 	if (anyChanged) {
 		v.tri_vec.clear();
 		get_triangles(v.tri_vec, v);
-		updateTriangleBuffer(v);
+		updateTriangleBuffer(voxel_objects);
 	}
 }
 

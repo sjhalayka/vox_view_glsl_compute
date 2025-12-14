@@ -359,13 +359,13 @@ void main() {
     // Check if point is inside any voxel
     int voxelIndex = findVoxelContainingPoint(localPos.xyz);
     
+    // Accumulate results (union of all obstacles)
+    // Only set to 1 if we found a voxel, never clear it back to 0
     if (voxelIndex >= 0) {
         backgroundDensities[index] = 1.0;
         backgroundCollisions[index] = voxelIndex;
-    } else {
-        backgroundDensities[index] = 0.0;
-        backgroundCollisions[index] = -1;
     }
+    // Note: We don't set to 0 here - the buffer is pre-cleared before processing all objects
 }
 )";
 
@@ -1448,7 +1448,7 @@ GLuint compileComputeShader(const char* source) {
 // GPU Initialization
 // ============================================================================
 
-void initGPUBuffers(voxel_object& v) {
+void initGPUBuffers(std::vector<voxel_object>& objects) {
     // Compile compute shaders
     computeProgram = compileComputeShader(backgroundPointsComputeShader);
     surfaceComputeProgram = compileComputeShader(surfaceDetectionComputeShader);
@@ -1461,48 +1461,58 @@ void initGPUBuffers(voxel_object& v) {
     // Create render program once
     renderProgram = createShaderProgram(commonVertexShaderSource, commonFragmentShaderSource);
 
-    // Prepare voxel centres as vec4 array
-    size_t numVoxels = v.voxel_centres.size();
-    vector<glm::vec4> voxelCentresVec4(numVoxels);
-    for (size_t i = 0; i < numVoxels; i++) {
-        voxelCentresVec4[i] = glm::vec4(v.voxel_centres[i].x, v.voxel_centres[i].y, v.voxel_centres[i].z, 0.0f);
+    // Initialize GPU data for each voxel object
+    voxelObjectGPUData.resize(objects.size());
+
+    for (size_t objIdx = 0; objIdx < objects.size(); objIdx++) {
+        voxel_object& v = objects[objIdx];
+        VoxelObjectGPUData& gpuData = voxelObjectGPUData[objIdx];
+
+        // Prepare voxel centres as vec4 array
+        size_t numVoxels = v.voxel_centres.size();
+        vector<glm::vec4> voxelCentresVec4(numVoxels);
+        for (size_t i = 0; i < numVoxels; i++) {
+            voxelCentresVec4[i] = glm::vec4(v.voxel_centres[i].x, v.voxel_centres[i].y, v.voxel_centres[i].z, 0.0f);
+        }
+
+        // Create SSBOs for voxel data
+        glGenBuffers(1, &gpuData.voxelCentresSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, gpuData.voxelCentresSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, numVoxels * sizeof(glm::vec4), voxelCentresVec4.data(), GL_STATIC_DRAW);
+
+        glGenBuffers(1, &gpuData.voxelDensitiesSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, gpuData.voxelDensitiesSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, numVoxels * sizeof(float), v.voxel_densities.data(), GL_STATIC_DRAW);
+
+        // Grid min/max buffer
+        struct GridMinMax {
+            glm::vec4 gridMin;
+            glm::vec4 gridMax;
+            glm::ivec4 voxelRes;
+        } gridData;
+
+        gridData.gridMin = glm::vec4(v.vo_grid_min.x, v.vo_grid_min.y, v.vo_grid_min.z, v.cell_size);
+        gridData.gridMax = glm::vec4(v.vo_grid_max.x, v.vo_grid_max.y, v.vo_grid_max.z, 0.0f);
+        gridData.voxelRes = glm::ivec4(v.voxel_x_res, v.voxel_y_res, v.voxel_z_res, 0);
+
+        glGenBuffers(1, &gpuData.gridMinMaxSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, gpuData.gridMinMaxSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GridMinMax), &gridData, GL_STATIC_DRAW);
+
+        // Create vo_grid_cells SSBO (maps cell position to voxel index)
+        vector<int> gridCellsInt(v.vo_grid_cells.size());
+        for (size_t i = 0; i < v.vo_grid_cells.size(); i++) {
+            gridCellsInt[i] = static_cast<int>(v.vo_grid_cells[i]);
+        }
+
+        glGenBuffers(1, &gpuData.voGridCellsSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, gpuData.voGridCellsSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, gridCellsInt.size() * sizeof(int), gridCellsInt.data(), GL_STATIC_DRAW);
+
+        cout << "Initialized GPU buffers for voxel object " << objIdx << endl;
     }
 
-    // Create SSBOs for voxel data
-    glGenBuffers(1, &voxelCentresSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, voxelCentresSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, numVoxels * sizeof(glm::vec4), voxelCentresVec4.data(), GL_STATIC_DRAW);
-
-    glGenBuffers(1, &voxelDensitiesSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, voxelDensitiesSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, numVoxels * sizeof(float), v.voxel_densities.data(), GL_STATIC_DRAW);
-
-    // Grid min/max buffer
-    struct GridMinMax {
-        glm::vec4 gridMin;
-        glm::vec4 gridMax;
-        glm::ivec4 voxelRes;
-    } gridData;
-
-    gridData.gridMin = glm::vec4(v.vo_grid_min.x, v.vo_grid_min.y, v.vo_grid_min.z, v.cell_size);
-    gridData.gridMax = glm::vec4(v.vo_grid_max.x, v.vo_grid_max.y, v.vo_grid_max.z, 0.0f);
-    gridData.voxelRes = glm::ivec4(v.voxel_x_res, v.voxel_y_res, v.voxel_z_res, 0);
-
-    glGenBuffers(1, &gridMinMaxSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, gridMinMaxSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GridMinMax), &gridData, GL_STATIC_DRAW);
-
-    // Create vo_grid_cells SSBO (maps cell position to voxel index)
-    vector<int> gridCellsInt(v.vo_grid_cells.size());
-    for (size_t i = 0; i < v.vo_grid_cells.size(); i++) {
-        gridCellsInt[i] = static_cast<int>(v.vo_grid_cells[i]);
-    }
-
-    glGenBuffers(1, &voGridCellsSSBO);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, voGridCellsSSBO);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, gridCellsInt.size() * sizeof(int), gridCellsInt.data(), GL_STATIC_DRAW);
-
-    // Create output SSBOs for background grid
+    // Create output SSBOs for background grid (shared across all objects)
     size_t gridSize = x_res * y_res * z_res;
 
     glGenBuffers(1, &backgroundDensitiesSSBO);
@@ -1548,8 +1558,10 @@ void initGPUBuffers(voxel_object& v) {
     glBindVertexArray(0);
 
     gpuInitialized = true;
-    cout << "GPU buffers initialized successfully" << endl;
+    cout << "GPU buffers initialized successfully for " << objects.size() << " voxel objects" << endl;
 }
+
+
 
 // ============================================================================
 // FLUID SIMULATION - Initialization (MODIFIED for temperature)
@@ -2355,39 +2367,60 @@ glm::vec3 screenToWorld(int mouseX, int mouseY, float depth) {
 // GPU Background Points Computation
 // ============================================================================
 
-void get_background_points_GPU(voxel_object& v) {
+
+
+void get_background_points_GPU(std::vector<voxel_object>& objects) {
     if (!gpuInitialized) return;
 
-    glUseProgram(computeProgram);
+    size_t gridSize = x_res * y_res * z_res;
 
-    // Bind SSBOs
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, voxelCentresSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, voxelDensitiesSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, gridMinMaxSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, backgroundDensitiesSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, backgroundCollisionsSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, voGridCellsSSBO);
+    // Clear background densities to 0 before processing all objects
+    vector<float> zeroDensities(gridSize, 0.0f);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, backgroundDensitiesSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroDensities.data());
 
-    // Set uniforms
-    glm::mat4 invModel = glm::inverse(v.model_matrix);
-    glUniformMatrix4fv(glGetUniformLocation(computeProgram, "invModelMatrix"), 1, GL_FALSE, glm::value_ptr(invModel));
+    vector<int> negOneCollisions(gridSize, -1);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, backgroundCollisionsSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(int), negOneCollisions.data());
 
     glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
     glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
-    glUniform3fv(glGetUniformLocation(computeProgram, "bgGridMin"), 1, glm::value_ptr(bgGridMin));
-    glUniform3fv(glGetUniformLocation(computeProgram, "bgGridMax"), 1, glm::value_ptr(bgGridMax));
-    glUniform3i(glGetUniformLocation(computeProgram, "bgRes"), x_res, y_res, z_res);
 
-    // Dispatch compute shader
     GLuint groupsX = (x_res + 7) / 8;
     GLuint groupsY = (y_res + 7) / 8;
     GLuint groupsZ = (z_res + 7) / 8;
-    glDispatchCompute(groupsX, groupsY, groupsZ);
 
-    // Memory barrier to ensure compute shader finished writing
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    // Process each voxel object - results are accumulated (union of all obstacles)
+    for (size_t objIdx = 0; objIdx < objects.size(); objIdx++) {
+        voxel_object& v = objects[objIdx];
+        VoxelObjectGPUData& gpuData = voxelObjectGPUData[objIdx];
 
-    // Surface detection pass
+        glUseProgram(computeProgram);
+
+        // Bind SSBOs for this object
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, gpuData.voxelCentresSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, gpuData.voxelDensitiesSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, gpuData.gridMinMaxSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, backgroundDensitiesSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, backgroundCollisionsSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, gpuData.voGridCellsSSBO);
+
+        // Set uniforms
+        glm::mat4 invModel = glm::inverse(v.model_matrix);
+        glUniformMatrix4fv(glGetUniformLocation(computeProgram, "invModelMatrix"), 1, GL_FALSE, glm::value_ptr(invModel));
+
+        glUniform3fv(glGetUniformLocation(computeProgram, "bgGridMin"), 1, glm::value_ptr(bgGridMin));
+        glUniform3fv(glGetUniformLocation(computeProgram, "bgGridMax"), 1, glm::value_ptr(bgGridMax));
+        glUniform3i(glGetUniformLocation(computeProgram, "bgRes"), x_res, y_res, z_res);
+
+        // Dispatch compute shader
+        glDispatchCompute(groupsX, groupsY, groupsZ);
+
+        // Memory barrier to ensure compute shader finished writing
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    }
+
+    // Surface detection pass (runs once after all objects are processed)
     glUseProgram(surfaceComputeProgram);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, backgroundDensitiesSSBO);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, surfaceDensitiesSSBO);
@@ -2401,6 +2434,20 @@ void get_background_points_GPU(voxel_object& v) {
         updateFluidObstacles();
     }
 }
+
+// Single object overload for backwards compatibility
+void get_background_points_GPU(voxel_object& v) {
+    std::vector<voxel_object> temp = { v };
+    // Temporarily set up GPU data if needed
+    if (voxelObjectGPUData.empty()) {
+        // This path shouldn't normally be hit with the new code
+        cerr << "Warning: get_background_points_GPU called with single object but no GPU data" << endl;
+        return;
+    }
+    get_background_points_GPU(voxel_objects);
+}
+
+
 
 // ============================================================================
 // Read back surface points for rendering
@@ -2464,12 +2511,14 @@ void updateSurfacePointsForRendering(voxel_object& v) {
 // Optimized Drawing Functions
 // ============================================================================
 
-void draw_triangles_fast(const glm::mat4& model) {
+void draw_triangles_fast(void) {
     if (numTriangleIndices == 0 || renderProgram == 0) return;
 
     glUseProgram(renderProgram);
 
-    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+    glm::mat4 identity(1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(renderProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
+
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
 
@@ -2560,7 +2609,7 @@ void take_screenshot(size_t num_cams_wide, const char* filename, const bool reve
             // Draw objects for screenshot
             draw_points_fast();
             if (draw_triangles_on_screen) {
-                draw_triangles_fast(vo.model_matrix);
+                draw_triangles_fast();
             }
 
             if (fluidSimEnabled) {
@@ -2676,7 +2725,7 @@ void draw_objects(void)
 
     // Draw triangles (voxel mesh)
     if (draw_triangles_on_screen) {
-        draw_triangles_fast(vo.model_matrix);
+        draw_triangles_fast();
     }
 
     // Draw fluid
@@ -2706,8 +2755,10 @@ void fluid_timer_func(int value) {
         // Update visualization
         updateFluidVisualization();
 
-        do_blackening(vo);
-        updateBlackenColors(vo);
+        for (auto& vo : voxel_objects) {
+            do_blackening(vo);
+            updateBlackenColors(vo);
+        }
     }
 
     glutPostRedisplay();
@@ -2737,8 +2788,11 @@ void keyboard_func(unsigned char key, int x, int y)
 
     case 'b':  // Blacken voxels with fluid
     {
-        do_blackening(vo);
-        cout << "Blackened voxels neighboring fluid surface points" << endl;
+        for (auto& vo : voxel_objects) {
+            do_blackening(vo);
+            updateBlackenColors(vo);
+        }
+
         break;
     }
 
@@ -2766,39 +2820,39 @@ void keyboard_func(unsigned char key, int x, int y)
         break;
 
         // Reset fluid
-    case 'c':
-        if (fluidInitialized) {
-            size_t gridSize = x_res * y_res * z_res;
-            vector<float> zeroDensity(gridSize, 0.0f);
-            vector<float> ambientTemp(gridSize, fluidParams.ambientTemperature);
-            vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
+    //case 'c':
+    //    if (fluidInitialized) {
+    //        size_t gridSize = x_res * y_res * z_res;
+    //        vector<float> zeroDensity(gridSize, 0.0f);
+    //        vector<float> ambientTemp(gridSize, fluidParams.ambientTemperature);
+    //        vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
 
-            for (int i = 0; i < 2; i++) {
-                glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[i]);
-                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroDensity.data());
+    //        for (int i = 0; i < 2; i++) {
+    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[i]);
+    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroDensity.data());
 
-                glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
-                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(glm::vec4), zeroVelocity.data());
+    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
+    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(glm::vec4), zeroVelocity.data());
 
-                // Reset temperature to ambient
-                glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
-                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), ambientTemp.data());
-            }
+    //            // Reset temperature to ambient
+    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
+    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), ambientTemp.data());
+    //        }
 
-            // Reset blackening state
-            if (!vo.voxel_original_colours.empty()) {
-                vo.voxel_colours = vo.voxel_original_colours;
-                fill(vo.voxel_blacken_times.begin(), vo.voxel_blacken_times.end(), -1.0f);
-                vo.tri_vec.clear();
-                get_triangles(vo.tri_vec, vo);
-                updateTriangleBuffer(vo);
-            }
+    //        // Reset blackening state
+    //        if (!vo.voxel_original_colours.empty()) {
+    //            vo.voxel_colours = vo.voxel_original_colours;
+    //            fill(vo.voxel_blacken_times.begin(), vo.voxel_blacken_times.end(), -1.0f);
+    //            vo.tri_vec.clear();
+    //            get_triangles(vo.tri_vec, vo);
+    //            updateTriangleBuffer(vo);
+    //        }
 
-            simulationStartTime = std::chrono::steady_clock::now();  // Reset clock
+    //        simulationStartTime = std::chrono::steady_clock::now();  // Reset clock
 
-            cout << "Fluid reset (including temperature and blackening)" << endl;
-        }
-        break;
+    //        cout << "Fluid reset (including temperature and blackening)" << endl;
+    //    }
+    //    break;
 
         // Adjust viscosity
     case '[':
@@ -2892,105 +2946,105 @@ void keyboard_func(unsigned char key, int x, int y)
         cout << "Gravity: " << fluidParams.gravity << endl;
         break;
 
-    case 'o':
-    {
-        vo.u += 0.1f;
-        vo.model_matrix = glm::mat4(1.0f);
-        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+    //case 'o':
+    //{
+    //    vo.u += 0.1f;
+    //    vo.model_matrix = glm::mat4(1.0f);
+    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
 
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
-        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-        get_background_points_GPU(vo);
-        glFinish();
-        updateSurfacePointsForRendering(vo);
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float, std::milli> elapsed = end - start;
-        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-        break;
-    }
-    case 'p':
-    {
-        vo.u -= 0.1f;
-        vo.model_matrix = glm::mat4(1.0f);
-        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    //    get_background_points_GPU(vo);
+    //    glFinish();
+    //    updateSurfacePointsForRendering(vo);
+    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    //    std::chrono::duration<float, std::milli> elapsed = end - start;
+    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+    //    break;
+    //}
+    //case 'p':
+    //{
+    //    vo.u -= 0.1f;
+    //    vo.model_matrix = glm::mat4(1.0f);
+    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
 
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
-        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-        get_background_points_GPU(vo);
-        glFinish();
-        updateSurfacePointsForRendering(vo);
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float, std::milli> elapsed = end - start;
-        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-        break;
-    }
-    case 'k':
-    {
-        vo.v += 0.1f;
-        vo.model_matrix = glm::mat4(1.0f);
-        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    //    get_background_points_GPU(vo);
+    //    glFinish();
+    //    updateSurfacePointsForRendering(vo);
+    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    //    std::chrono::duration<float, std::milli> elapsed = end - start;
+    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+    //    break;
+    //}
+    //case 'k':
+    //{
+    //    vo.v += 0.1f;
+    //    vo.model_matrix = glm::mat4(1.0f);
+    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
 
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
-        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-        get_background_points_GPU(vo);
-        glFinish();
-        updateSurfacePointsForRendering(vo);
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float, std::milli> elapsed = end - start;
-        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-        break;
-    }
-    case 'l':
-    {
-        vo.v -= 0.1f;
-        vo.model_matrix = glm::mat4(1.0f);
-        vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    //    get_background_points_GPU(vo);
+    //    glFinish();
+    //    updateSurfacePointsForRendering(vo);
+    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    //    std::chrono::duration<float, std::milli> elapsed = end - start;
+    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+    //    break;
+    //}
+    //case 'l':
+    //{
+    //    vo.v -= 0.1f;
+    //    vo.model_matrix = glm::mat4(1.0f);
+    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
 
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
-        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-        get_background_points_GPU(vo);
-        glFinish();
-        updateSurfacePointsForRendering(vo);
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float, std::milli> elapsed = end - start;
-        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-        break;
-    }
+    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    //    get_background_points_GPU(vo);
+    //    glFinish();
+    //    updateSurfacePointsForRendering(vo);
+    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    //    std::chrono::duration<float, std::milli> elapsed = end - start;
+    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+    //    break;
+    //}
 
     // Real-time continuous rotation mode
-    case 'r':
-    {
-        static bool realtime_mode = false;
-        realtime_mode = !realtime_mode;
-        cout << "Real-time mode: " << (realtime_mode ? "ON" : "OFF") << endl;
+    //case 'r':
+    //{
+    //    static bool realtime_mode = false;
+    //    realtime_mode = !realtime_mode;
+    //    cout << "Real-time mode: " << (realtime_mode ? "ON" : "OFF") << endl;
 
-        if (realtime_mode) {
-            // Set up timer for continuous updates
-            glutTimerFunc(16, [](int) {
-                vo.u += 0.02f;
-                vo.model_matrix = glm::mat4(1.0f);
-                vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+    //    if (realtime_mode) {
+    //        // Set up timer for continuous updates
+    //        glutTimerFunc(16, [](int) {
+    //            vo.u += 0.02f;
+    //            vo.model_matrix = glm::mat4(1.0f);
+    //            vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
 
-                vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-                vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+    //            vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+    //            vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
 
-                get_background_points_GPU(vo);
-                updateSurfacePointsForRendering(vo);
+    //            get_background_points_GPU(vo);
+    //            updateSurfacePointsForRendering(vo);
 
-                glutPostRedisplay();
-                glutTimerFunc(16, nullptr, 0); // Continue timer
-                }, 0);
-        }
-        break;
-    }
+    //            glutPostRedisplay();
+    //            glutTimerFunc(16, nullptr, 0); // Continue timer
+    //            }, 0);
+    //    }
+    //    break;
+    //}
 
     // Print controls
     case 'h':
@@ -3185,29 +3239,45 @@ int main(int argc, char** argv)
             }
         }
     }
+    // Load all voxel objects
+    voxel_objects.resize(voxelFiles.size());
 
-    vo.model_matrix = glm::mat4(1.0f);
-    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
+    for (size_t i = 0; i < voxelFiles.size(); i++) {
+        cout << "Loading voxel file: " << voxelFiles[i].filename << endl;
 
+        // Set up model matrix with location
+        voxel_objects[i].model_matrix = glm::mat4(1.0f);
+        voxel_objects[i].model_matrix = glm::translate(voxel_objects[i].model_matrix, voxelFiles[i].location);
 
+        // Load voxel data
+        if (!get_voxels(voxelFiles[i].filename.c_str(), voxel_objects[i])) {
+            cerr << "Failed to load: " << voxelFiles[i].filename << endl;
+            continue;
+        }
 
-    get_voxels("chr_knight.vox", vo);
-    get_triangles(vo.tri_vec, vo);
+        // Generate triangles
+        get_triangles(voxel_objects[i].tri_vec, voxel_objects[i]);
 
-    // Initialize GPU buffers after loading voxel data
-    initGPUBuffers(vo);
+        cout << "Loaded " << voxelFiles[i].filename << " at position ("
+            << voxelFiles[i].location.x << ", "
+            << voxelFiles[i].location.y << ", "
+            << voxelFiles[i].location.z << ")" << endl;
+    }
 
-    // Initial GPU computation
+    // Initialize GPU buffers for all voxel objects
+    initGPUBuffers(voxel_objects);
+
+    // Initial GPU computation for all objects
     std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    get_background_points_GPU(vo);
+    get_background_points_GPU(voxel_objects);
     glFinish(); // Wait for GPU to complete
     std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<float, std::milli> elapsed = end - start;
     cout << "Initial GPU background points computation: " << elapsed.count() << " ms" << endl;
 
-    // Update render buffers
-    updateTriangleBuffer(vo);
-    updateSurfacePointsForRendering(vo);
+    // Update render buffers with all objects
+    updateTriangleBuffer(voxel_objects);
+    updateSurfacePointsForRendering(voxel_objects[0]); // Surface points are shared
 
     cout << "Surface points: " << numSurfacePoints << endl;
 
