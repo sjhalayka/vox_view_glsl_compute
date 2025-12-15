@@ -2944,6 +2944,46 @@ void keyboard_func(unsigned char key, int x, int y)
         cout << "Gravity: " << fluidParams.gravity << endl;
         break;
 
+
+
+    case 'o':
+    {
+        // Assuming you want to operate on a specifi c voxel object, e.g., voxel_objects[0]
+        voxel_object& vo = voxel_objects[0];  // or whichever object you want to transform
+
+        vo.u += 0.1f;
+        vo.model_matrix = glm::mat4(1.0f);
+
+        vo.model_matrix = glm::translate(vo.model_matrix, voxelFiles[0].location);
+
+        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+
+        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+        get_background_points_GPU(voxel_objects);
+        updateTriangleBuffer(voxel_objects);
+
+//        updateSurfacePointsForRendering(vo);
+        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<float, std::milli> elapsed = end - start;
+        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+
+
+        break;
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
     //case 'o':
     //{
     //    vo.u += 0.1f;
