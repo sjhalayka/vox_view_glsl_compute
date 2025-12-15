@@ -3199,14 +3199,10 @@ void idle_func(void) {
 
             stepFluidSimulation();
 
-
-
         	GLOBAL_TIME += fluidParams.dt;
         	lastTime = currentTime;
             accumulator -= fluidParams.dt;
-
         }
-
 
         if (injectDensity || injectVelocity) {
             mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
