@@ -125,7 +125,7 @@ std::vector<VoxelObjectGPUData> voxelObjectGPUData;
 
 // Fluid simulation parameters
 struct FluidParams {
-	float dt = 1.0f/60.0f;              // Time step (~60 fps)
+	float dt = 1.0f/30.0f;              // Time step (~60 fps)
 	float viscosity = 0.0001f;      // Kinematic viscosity
 	float diffusion = 0.0001f;      // Density diffusion rate
 	int jacobiIterations = 20;      // Pressure solver iterations
