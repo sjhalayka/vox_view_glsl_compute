@@ -123,14 +123,14 @@ std::vector<VoxelObjectGPUData> voxelObjectGPUData;
 
 // Fluid simulation parameters
 struct FluidParams {
-	float dt = 0.016f;              // Time step (~60 fps)
+	float dt = 1.0f/30.0f;              // Time step (~60 fps)
 	float viscosity = 0.0001f;      // Kinematic viscosity
 	float diffusion = 0.0001f;      // Density diffusion rate
-	int jacobiIterations = 40;      // Pressure solver iterations
+	int jacobiIterations = 20;      // Pressure solver iterations
 	float smagorinskyConst = 0.1f;  // Smagorinsky constant for LES turbulence
 	float densityAmount = 10.0f;   // Amount of density to inject
 	float velocityAmount = 100.0f;   // Amount of velocity to inject
-	float densityDissipation = 0.9f; // Density dissipation per frame
+	float densityDissipation = 0.99f; // Density dissipation per frame
 	float velocityDissipation = 0.99f; // Velocity dissipation per frame
 
 	// ============================================================================

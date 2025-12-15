@@ -3315,7 +3315,8 @@ int main(int argc, char** argv)
 
     // Update render buffers with all objects
     updateTriangleBuffer(voxel_objects);
-    updateSurfacePointsForRendering(voxel_objects[0]); // Surface points are shared
+    //updateSurfacePointsForRendering(voxel_objects[0]); // Surface points are shared
+
 
     cout << "Surface points: " << numSurfacePoints << endl;
 
