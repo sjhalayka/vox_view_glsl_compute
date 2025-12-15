@@ -129,8 +129,8 @@ struct FluidParams {
 	int jacobiIterations = 40;      // Pressure solver iterations
 	float smagorinskyConst = 0.1f;  // Smagorinsky constant for LES turbulence
 	float densityAmount = 10.0f;   // Amount of density to inject
-	float velocityAmount = 10.0f;   // Amount of velocity to inject
-	float densityDissipation = 0.995f; // Density dissipation per frame
+	float velocityAmount = 100.0f;   // Amount of velocity to inject
+	float densityDissipation = 0.9f; // Density dissipation per frame
 	float velocityDissipation = 0.99f; // Velocity dissipation per frame
 
 	// ============================================================================
@@ -155,7 +155,7 @@ struct FluidParams {
 	bool enableTemperature = true;        // Toggle temperature field
 
 	// Visualization
-	bool visualizeTemperature = true;    // Show temperature instead of density
+	bool visualizeTemperature = false;    // Show temperature instead of density
 };
 
 FluidParams fluidParams;
@@ -1154,7 +1154,7 @@ void do_blackening(voxel_object& v)
 						if (backgroundDensities[neighborIndex] > 0.0f) {
 							int voxelIndex = backgroundCollisions[neighborIndex];
 							if (voxelIndex >= 0 && voxelIndex < static_cast<int>(v.voxel_centres.size())) {
-								// DO NOT DO: only mark if not already blackening
+								// Only mark if not already blackening
 								if (1 /*v.voxel_blacken_times[voxelIndex] < 0.0f*/) {
 									v.voxel_blacken_times[voxelIndex] = getElapsedSeconds();
 									newlyBlackenedCount++;

@@ -226,27 +226,27 @@ void main() {
     FragColor = layerColor;
     return;
 
-    vec3 normal = normalize(fragNormal);
+    //vec3 normal = normalize(fragNormal);
 
-    // Simple directional lighting
-    vec3 lightColor = vec3(1.0);
-    float ambientStrength = 0.3;
-    vec3 ambient = ambientStrength * lightColor;
-    
-    // Diffuse - use abs for double-sided lighting
-    float diff = abs(dot(normal, normalize(-lightDir)));
-    vec3 diffuse = diff * lightColor;
-    
-    // Specular
-    vec3 viewDir = normalize(viewPos - fragPos);
-    vec3 reflectDir = reflect(normalize(lightDir), normal);
-    float spec = pow(max(abs(dot(viewDir, reflectDir)), 0.0), 32.0);
-    vec3 specular = 0.3 * spec * lightColor;
-    
-    vec3 lighting = ambient + diffuse + specular;
-    vec3 finalColor = lighting * layerColor.rgb;
-    
-    FragColor = vec4(finalColor, layerColor.a);
+    //// Simple directional lighting
+    //vec3 lightColor = vec3(1.0);
+    //float ambientStrength = 0.3;
+    //vec3 ambient = ambientStrength * lightColor;
+    //
+    //// Diffuse - use abs for double-sided lighting
+    //float diff = abs(dot(normal, normalize(-lightDir)));
+    //vec3 diffuse = diff * lightColor;
+    //
+    //// Specular
+    //vec3 viewDir = normalize(viewPos - fragPos);
+    //vec3 reflectDir = reflect(normalize(lightDir), normal);
+    //float spec = pow(max(abs(dot(viewDir, reflectDir)), 0.0), 32.0);
+    //vec3 specular = 0.3 * spec * lightColor;
+    //
+    //vec3 lighting = ambient + diffuse + specular;
+    //vec3 finalColor = lighting * layerColor.rgb;
+    //
+    //FragColor = vec4(finalColor, layerColor.a);
 }
 )";
 
