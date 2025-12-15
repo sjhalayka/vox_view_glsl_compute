@@ -8,6 +8,8 @@
 #include "custom_math.h"
 #include "ogt_vox.h"
 
+
+
 #include "shader_utils.h"
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
@@ -1538,6 +1540,94 @@ void cleanupMarchingCubes();
 
 
 
+
+
+
+// Utility functions
+void checkGLError(const char* operation) {
+	GLenum error = glGetError();
+	if (error != GL_NO_ERROR) {
+		std::cerr << "OpenGL error after " << operation << ": " << error << std::endl;
+	}
+}
+
+GLuint compileShader(GLenum type, const char* source) {
+	GLuint shader = glCreateShader(type);
+	glShaderSource(shader, 1, &source, nullptr);
+	glCompileShader(shader);
+
+	GLint success;
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+	if (!success) {
+		char infoLog[512];
+		glGetShaderInfoLog(shader, 512, nullptr, infoLog);
+		std::cerr << "Shader compilation failed:\n" << infoLog << std::endl;
+		std::cerr << "Source:\n" << source << std::endl;
+	}
+
+	return shader;
+}
+
+
+
+const char* textVertexShaderSource = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aTexCoord;
+layout(location = 2) in vec4 aColor;
+
+uniform mat4 projection;
+uniform mat4 model;
+
+out vec2 TexCoord;
+out vec4 Color;
+
+void main() {
+    gl_Position = projection * model * vec4(aPos, 1.0);
+    TexCoord = aTexCoord;
+    Color = aColor;
+}
+)";
+
+const char* textFragmentShaderSource = R"(
+#version 330 core
+in vec2 TexCoord;
+in vec4 Color;
+
+uniform sampler2D fontTexture;
+uniform bool useColor;
+
+out vec4 FragColor;
+
+void main() {
+    vec4 texColor = texture(fontTexture, TexCoord);
+    
+    // Handle different font texture formats
+    if (useColor) {
+        // For colored font atlas, just blend with the vertex color
+        FragColor = texColor * Color;
+    } else {
+        // For grayscale/alpha font atlas, use the alpha/red channel
+        // with the vertex color
+        float alpha = texColor.r; // or texColor.a depending on your font texture
+        FragColor = vec4(Color.rgb, Color.a * alpha);
+    }
+}
+)";
+
+
+
+
+
+
+struct FontAtlas {
+	GLuint textureID;
+	int charWidth;      // Width of each character (16)
+	int charHeight;     // Height of each character (16)
+	int atlasWidth;     // Atlas width (256)
+	int atlasHeight;    // Atlas height (256)
+	int charsPerRow;    // Characters per row in the atlas (16)
+};
 
 
 
