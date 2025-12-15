@@ -1731,27 +1731,6 @@ void stepFluidSimulation() {
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
     }
 
-    // ========================================
-    // 2. Apply turbulence (Smagorinsky LES)
-    // ========================================
-    glUseProgram(turbulenceProgram);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, velocitySSBO[src]);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, velocitySSBO[dst]);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, turbulentViscositySSBO);
-
-    glUniform3i(glGetUniformLocation(turbulenceProgram, "gridRes"), x_res, y_res, z_res);
-    glUniform3fv(glGetUniformLocation(turbulenceProgram, "gridMin"), 1, glm::value_ptr(bgGridMin));
-    glUniform3fv(glGetUniformLocation(turbulenceProgram, "gridMax"), 1, glm::value_ptr(bgGridMax));
-    glUniform1f(glGetUniformLocation(turbulenceProgram, "dt"), fluidParams.dt);
-    glUniform1f(glGetUniformLocation(turbulenceProgram, "smagorinskyConst"), fluidParams.smagorinskyConst);
-    glUniform1f(glGetUniformLocation(turbulenceProgram, "baseViscosity"), fluidParams.viscosity);
-
-    glDispatchCompute(groupsX, groupsY, groupsZ);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    // Swap buffers after turbulence
-    std::swap(src, dst);
 
     // ========================================
     // 3. Advect velocity (semi-Lagrangian)
@@ -2860,16 +2839,6 @@ void keyboard_func(unsigned char key, int x, int y)
     case ']':
         fluidParams.viscosity *= 2.0f;
         cout << "Viscosity: " << fluidParams.viscosity << endl;
-        break;
-
-        // Adjust Smagorinsky constant
-    case '-':
-        fluidParams.smagorinskyConst = std::max(0.01f, fluidParams.smagorinskyConst - 0.02f);
-        cout << "Smagorinsky constant: " << fluidParams.smagorinskyConst << endl;
-        break;
-    case '=':
-        fluidParams.smagorinskyConst = std::min(0.5f, fluidParams.smagorinskyConst + 0.02f);
-        cout << "Smagorinsky constant: " << fluidParams.smagorinskyConst << endl;
         break;
 
         // Adjust injection radius

@@ -127,7 +127,7 @@ struct FluidParams {
 	float viscosity = 0.0001f;      // Kinematic viscosity
 	float diffusion = 0.0001f;      // Density diffusion rate
 	int jacobiIterations = 20;      // Pressure solver iterations
-	float smagorinskyConst = 0.1f;  // Smagorinsky constant for LES turbulence
+
 	float densityAmount = 10.0f;   // Amount of density to inject
 	float velocityAmount = 100.0f;   // Amount of velocity to inject
 	float densityDissipation = 0.99f; // Density dissipation per frame
