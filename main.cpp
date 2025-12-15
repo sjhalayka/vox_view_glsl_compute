@@ -3120,10 +3120,17 @@ void idle_func(void) {
             lastMouseWorldPos = currentMouseWorldPos;
         }
 
-        updateFluidVisualization();  // Or move this outside the loop if too heavy
+        // Detect fluid-obstacle collisions
+        static const int COLLISION_INTERVAL_MS = 100;
+        static int collision_lastCallTime = 0;
+        int curr_time_int = glutGet(GLUT_ELAPSED_TIME);
 
-        for (auto& vo : voxel_objects) {
-            do_blackening(vo);
+        if (curr_time_int - collision_lastCallTime >= COLLISION_INTERVAL_MS)
+        {
+            for (auto& vo : voxel_objects)
+                do_blackening(vo);
+
+            collision_lastCallTime = curr_time_int;
         }
     }
 
@@ -3151,17 +3158,6 @@ void keyboard_func(unsigned char key, int x, int y)
         useMarchingCubes = !useMarchingCubes;
         cout << "Rendering mode: " << (useMarchingCubes ? "Marching Cubes" : "Ray Marching") << endl;
         break;
-
-
-    case 'b':  // Blacken voxels with fluid
-    {
-        for (auto& vo : voxel_objects) {
-            do_blackening(vo);
-        }
-
-        break;
-    }
-
 
     case 'm':
         take_screenshot(4, "out.tga");
