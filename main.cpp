@@ -3090,13 +3090,40 @@ void draw_objects(void)
     }
 }
 
+float GLOBAL_TIME = 0;
 
 void fluid_timer_func(int value) {
     if (fluidSimEnabled && fluidInitialized) {
-        // Step the fluid simulation
-        stepFluidSimulation();
 
-        // Handle mouse injection
+		//// Fixed time step
+		//static double currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+		//static double accumulator = 0.0;
+
+		//double newTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+		//double frameTime = newTime - currentTime;
+		//currentTime = newTime;
+
+		//if (frameTime > fluidParams.dt * 10.0)
+		//	frameTime = fluidParams.dt * 10.0;
+
+		//accumulator += frameTime;
+
+		//while (accumulator >= fluidParams.dt)
+		//{
+  //          static float lastTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f; // Convert to seconds
+  //          float currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+
+			stepFluidSimulation();
+
+
+
+		//	GLOBAL_TIME += fluidParams.dt;
+		//	lastTime = currentTime;
+  //          accumulator -= fluidParams.dt;
+
+		//}
+
+
         if (injectDensity || injectVelocity) {
             mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
             addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
@@ -3109,10 +3136,45 @@ void fluid_timer_func(int value) {
         for (auto& vo : voxel_objects) {
             do_blackening(vo);
         }
+
+
+        //static float lastTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f; // Convert to seconds
+        //float currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+
+        //const float d = 1.0f / 30.0;
+
+        //fluidParams.dt = currentTime - lastTime;
+
+        //if (fluidParams.dt > d)
+        //{
+        //    // Step the fluid simulation
+        //    stepFluidSimulation();
+
+        //    if (injectDensity || injectVelocity) {
+        //        mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
+        //        addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
+        //        lastMouseWorldPos = currentMouseWorldPos;
+        //    }
+
+        //    // Update visualization
+        //    updateFluidVisualization();
+
+        //    for (auto& vo : voxel_objects) {
+        //        do_blackening(vo);
+        //    }
+
+        //    GLOBAL_TIME += fluidParams.dt;
+        //    lastTime = currentTime;
+        //}
+
+
+
+        // Handle mouse injection
+
     }
 
     glutPostRedisplay();
-    glutTimerFunc(16, fluid_timer_func, 0);
+     glutTimerFunc(64, fluid_timer_func, 0);
 }
 
 
@@ -3399,32 +3461,7 @@ void keyboard_func(unsigned char key, int x, int y)
     //    break;
     //}
 
-    // Real-time continuous rotation mode
-    //case 'r':
-    //{
-    //    static bool realtime_mode = false;
-    //    realtime_mode = !realtime_mode;
-    //    cout << "Real-time mode: " << (realtime_mode ? "ON" : "OFF") << endl;
 
-    //    if (realtime_mode) {
-    //        // Set up timer for continuous updates
-    //        glutTimerFunc(16, [](int) {
-    //            vo.u += 0.02f;
-    //            vo.model_matrix = glm::mat4(1.0f);
-    //            vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //            vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //            vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //            get_background_points_GPU(vo);
-    //            updateSurfacePointsForRendering(vo);
-
-    //            glutPostRedisplay();
-    //            glutTimerFunc(16, nullptr, 0); // Continue timer
-    //            }, 0);
-    //    }
-    //    break;
-    //}
 
     // Print controls
     case 'h':
@@ -3694,7 +3731,7 @@ int main(int argc, char** argv)
 
 
     // Start fluid simulation timer
-    glutTimerFunc(16, fluid_timer_func, 0);
+    glutTimerFunc(64, fluid_timer_func, 0);
 
     glutMainLoop();
 
