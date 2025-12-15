@@ -3128,8 +3128,7 @@ void fluid_timer_func(int value) {
         do_blackening(vo);
     }
 
-
-        glutTimerFunc(16, fluid_timer_func, 0);
+    glutTimerFunc(1, fluid_timer_func, 0);
 }
 
 
@@ -3734,9 +3733,8 @@ int main(int argc, char** argv)
     textRenderer = new TextRenderer("font.png", win_x, win_y);
 
 
-
     // Start fluid simulation timer
-    glutTimerFunc(16, fluid_timer_func, 0);
+    glutTimerFunc(1, fluid_timer_func, 0);
 
     glutMainLoop();
 
