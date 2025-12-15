@@ -986,8 +986,7 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 
 
 
-// Replace the do_blackening function with this corrected version
-// Color interpolation helper for blackening effect
+
 glm::vec4 getBlackenColor(float t, const glm::vec4& originalColor) {
 	// t goes from 0 (just blackened) to 1 (fully black)
 	t = glm::clamp(t, 0.0f, 1.0f);
@@ -1155,8 +1154,8 @@ void do_blackening(voxel_object& v)
 						if (backgroundDensities[neighborIndex] > 0.0f) {
 							int voxelIndex = backgroundCollisions[neighborIndex];
 							if (voxelIndex >= 0 && voxelIndex < static_cast<int>(v.voxel_centres.size())) {
-								// Only mark if not already blackening
-								if (v.voxel_blacken_times[voxelIndex] < 0.0f) {
+								// DO NOT DO: only mark if not already blackening
+								if (1 /*v.voxel_blacken_times[voxelIndex] < 0.0f*/) {
 									v.voxel_blacken_times[voxelIndex] = getElapsedSeconds();
 									newlyBlackenedCount++;
 								}

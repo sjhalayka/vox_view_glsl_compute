@@ -2757,7 +2757,6 @@ void fluid_timer_func(int value) {
 
         for (auto& vo : voxel_objects) {
             do_blackening(vo);
-            updateBlackenColors(vo);
         }
     }
 
@@ -2790,7 +2789,6 @@ void keyboard_func(unsigned char key, int x, int y)
     {
         for (auto& vo : voxel_objects) {
             do_blackening(vo);
-            updateBlackenColors(vo);
         }
 
         break;
