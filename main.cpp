@@ -3236,16 +3236,7 @@ int main(int argc, char** argv)
     cout << "OpenGL Version: " << glGetString(GL_VERSION) << endl;
     cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << endl;
 
-    test_texture.resize(x_res * y_res * z_res, 0);
-    for (size_t x = 0; x < x_res; x++) {
-        for (size_t y = 0; y < y_res; y++) {
-            for (size_t z = 0; z < z_res; z++) {
-                const size_t voxel_index = x + y * x_res + z * x_res * y_res;
-                if (y >= y_res / 2)
-                    test_texture[voxel_index] = 255;
-            }
-        }
-    }
+
     // Load all voxel objects
     voxel_objects.resize(voxelFiles.size());
 

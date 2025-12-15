@@ -80,7 +80,7 @@ int mouse_x = 0;
 int mouse_y = 0;
 
 
-vector<unsigned char> test_texture;
+
 
 const size_t x_res = 128;
 const size_t y_res = 128;
@@ -1519,8 +1519,7 @@ GLuint mcVAO = 0;
 GLuint mcVBO = 0;
 GLuint mcNormalVBO = 0;
 
-// Maximum vertices (conservative estimate: ~5 triangles per active cell * 3 verts)
-const size_t MC_MAX_VERTICES = 1024 * 1024 * 3;  // 3M vertices max
+const size_t MC_MAX_VERTICES = x_res * y_res * z_res * 5 * 3; // Max 5 triangles per cell
 
 // Toggle for marching cubes vs ray marching
 bool useMarchingCubes = true;
@@ -1534,6 +1533,15 @@ void runMarchingCubes(float isoValue, int layerIndex);
 void runAllMarchingCubesLayers();
 void drawMarchingCubesMesh();
 void cleanupMarchingCubes();
+
+
+
+
+
+
+
+
+
 
 
 
