@@ -3088,97 +3088,47 @@ void draw_objects(void)
 
 float GLOBAL_TIME = 0;
 
-void fluid_timer_func(int value) {
-    //if (fluidSimEnabled && fluidInitialized) {
-       // Fixed time step
-    static double currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
-    static double accumulator = 0.0;
-
-    double newTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
-    double frameTime = newTime - currentTime;
-    currentTime = newTime;
-
-    if (frameTime > fluidParams.dt * 10.0)
-        frameTime = fluidParams.dt * 10.0;
-
-    accumulator += frameTime;
-
-    while (accumulator >= fluidParams.dt)
-    {
-        static float lastTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f; // Convert to seconds
-        float currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
-
-        stepFluidSimulation();
-
-        GLOBAL_TIME += fluidParams.dt;
-        lastTime = currentTime;
-        accumulator -= fluidParams.dt;
-    }
-
-    if (injectDensity || injectVelocity) {
-        mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
-        addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
-        lastMouseWorldPos = currentMouseWorldPos;
-    }
-
-    // Update visualization
-    updateFluidVisualization();
-
-    for (auto& vo : voxel_objects) {
-        do_blackening(vo);
-    }
-
-    glutTimerFunc(1, fluid_timer_func, 0);
-}
-
 
 
 
 void idle_func(void) {
     if (fluidSimEnabled && fluidInitialized) {
+        static float accumulator = 0.0f;
+        static float lastTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
 
- 
+        float currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+        float frameDelta = currentTime - lastTime;
+        lastTime = currentTime;
 
+        accumulator += frameDelta;
 
-        //static float lastTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f; // Convert to seconds
-        //float currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+        // Optional: Cap accumulator to prevent spiral of death if FPS drops too low
+        if (accumulator > 0.2f) accumulator = 0.2f;  // Max ~6 steps per frame
 
-        //const float d = 1.0f / 30.0;
-
-        //fluidParams.dt = currentTime - lastTime;
-
-        //if (fluidParams.dt > d)
-        //{
-        //    // Step the fluid simulation
-        //    stepFluidSimulation();
-
-        //    if (injectDensity || injectVelocity) {
-        //        mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
-        //        addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
-        //        lastMouseWorldPos = currentMouseWorldPos;
-        //    }
-
-        //    // Update visualization
-        //    updateFluidVisualization();
-
-        //    for (auto& vo : voxel_objects) {
-        //        do_blackening(vo);
-        //    }
-
-        //    GLOBAL_TIME += fluidParams.dt;
-        //    lastTime = currentTime;
-        //}
+        while (accumulator >= fluidParams.dt) {
+            stepFluidSimulation();
 
 
 
-        // Handle mouse injection
+            GLOBAL_TIME += fluidParams.dt;
+            accumulator -= fluidParams.dt;
+        }
 
+        if (injectDensity || injectVelocity) {
+            mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
+            addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
+            lastMouseWorldPos = currentMouseWorldPos;
+        }
+
+        updateFluidVisualization();  // Or move this outside the loop if too heavy
+
+        for (auto& vo : voxel_objects) {
+            do_blackening(vo);
+        }
     }
 
-   glutPostRedisplay();
-     
+    glutPostRedisplay();
 }
-
 
 
 
@@ -3734,7 +3684,7 @@ int main(int argc, char** argv)
 
 
     // Start fluid simulation timer
-    glutTimerFunc(1, fluid_timer_func, 0);
+    //glutTimerFunc(1, fluid_timer_func, 0);
 
     glutMainLoop();
 
