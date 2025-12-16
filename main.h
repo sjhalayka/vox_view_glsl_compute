@@ -409,7 +409,7 @@ void initDefaultLights() {
 	// One point light
 	pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
 	pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	pointLights[0].intensity = 100.0f;
+	pointLights[0].intensity = 50.0f;
 	pointLights[0].enabled = true;
 }
 
