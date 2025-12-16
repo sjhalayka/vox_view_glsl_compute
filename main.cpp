@@ -4092,13 +4092,13 @@ void keyboard_func(unsigned char key, int x, int y)
     switch (tolower(key))
     {
     case '9':
-        shadowParams.bias = std::max(0.0001f, shadowParams.bias - 0.001f);
-        cout << "Shadow bias: " << shadowParams.bias << endl;
+        shadowParams.normalBias = shadowParams.normalBias * 2.0f;
+        cout << "normalBias bias: " << shadowParams.normalBias << endl;
         break;
 
     case '0':
-        shadowParams.bias = std::min(0.05f, shadowParams.bias + 0.001f);
-        cout << "Shadow bias: " << shadowParams.bias << endl;
+        shadowParams.normalBias = shadowParams.normalBias / 2.0f;
+        cout << "normalBias bias: " << shadowParams.normalBias << endl;
         break;
 
     case '-':
