@@ -444,7 +444,7 @@ GLuint pointShadowDepthProgram = 0;      // For point light cube maps
 
 // Shadow mapping parameters
 struct ShadowParams {
-	float bias = 0.0000001f;              // Depth bias to prevent shadow acne
+	float bias = 0.0f;              // Depth bias to prevent shadow acne
 	float normalBias = 0.02f;         // Normal-based bias
 	int pcfSamples = 1;               // PCF kernel size (2 = 5x5 samples)
 	bool enableShadows = true;        // Global shadow toggle

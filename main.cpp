@@ -2656,11 +2656,22 @@ void renderDirLightShadowMap(int lightIndex) {
 
     // Render shadow casters
     glEnable(GL_DEPTH_TEST);
-    glCullFace(GL_FRONT);  // Reduce shadow acne by rendering back faces
+//    glCullFace(GL_FRONT);  // Reduce shadow acne by rendering back faces
+
+
+
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);  // slope factor, constant bias
 
     renderSceneForShadows(shadowDepthProgram);
 
-    glCullFace(GL_BACK);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+
+
+
+    renderSceneForShadows(shadowDepthProgram);
+
+ //   glCullFace(GL_BACK);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
