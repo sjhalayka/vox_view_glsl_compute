@@ -328,8 +328,94 @@ GLuint volumeRenderProgram = 0;
 // Vertex structure for shader compatibility
 struct RenderVertex {
 	float position[3];
+	float normal[3];
 	float color[3];
 };
+
+// ============================================================================
+// LIGHTING STRUCTURES
+// ============================================================================
+
+const int MAX_POINT_LIGHTS = 8;
+const int MAX_SPOT_LIGHTS = 8;
+const int MAX_DIR_LIGHTS = 4;
+
+struct PointLight {
+	glm::vec3 position;
+	glm::vec3 color;
+	float intensity;
+	float constant;     // Attenuation: 1.0
+	float linear;       // Attenuation: 0.09
+	float quadratic;    // Attenuation: 0.032
+	bool enabled;
+
+	PointLight() : position(0.0f), color(1.0f), intensity(1.0f),
+		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
+	}
+};
+
+struct SpotLight {
+	glm::vec3 position;
+	glm::vec3 direction;
+	glm::vec3 color;
+	float intensity;
+	float cutOff;       // Inner cone angle (cosine)
+	float outerCutOff;  // Outer cone angle (cosine)
+	float constant;
+	float linear;
+	float quadratic;
+	bool enabled;
+
+	SpotLight() : position(0.0f), direction(0.0f, -1.0f, 0.0f), color(1.0f),
+		intensity(1.0f), cutOff(glm::cos(glm::radians(12.5f))),
+		outerCutOff(glm::cos(glm::radians(17.5f))),
+		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
+	}
+};
+
+struct DirectionalLight {
+	glm::vec3 direction;
+	glm::vec3 color;
+	float intensity;
+	bool enabled;
+
+	DirectionalLight() : direction(0.0f, -1.0f, 0.0f), color(1.0f),
+		intensity(1.0f), enabled(false) {
+	}
+};
+
+// Global light arrays
+std::vector<PointLight> pointLights(MAX_POINT_LIGHTS);
+std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
+std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
+
+// Material properties
+struct Material {
+	float ambient;
+	float shininess;
+	Material() : ambient(0.1f), shininess(32.0f) {}
+};
+
+Material globalMaterial;
+
+// Initialize default lights
+void initDefaultLights() {
+	// One directional light (sun-like)
+	dirLights[0].direction = glm::normalize(glm::vec3(-0.5f, -1.0f, -0.3f));
+	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	dirLights[0].intensity = 0.8f;
+	dirLights[0].enabled = true;
+
+	// One point light
+	pointLights[0].position = glm::vec3(5.0f, 10.0f, 5.0f);
+	pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	pointLights[0].intensity = 1.0f;
+	pointLights[0].enabled = true;
+}
+
+
+
+
 
 // GPU Buffer handles
 GLuint computeProgram = 0;
@@ -546,6 +632,19 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	// Combine triangles from all voxel objects
 	for (auto& v : objects) {
 		for (size_t i = 0; i < v.tri_vec.size(); i++) {
+			// Compute face normal from triangle vertices
+			glm::vec3 v0(v.tri_vec[i].vertex[0].x, v.tri_vec[i].vertex[0].y, v.tri_vec[i].vertex[0].z);
+			glm::vec3 v1(v.tri_vec[i].vertex[1].x, v.tri_vec[i].vertex[1].y, v.tri_vec[i].vertex[1].z);
+			glm::vec3 v2(v.tri_vec[i].vertex[2].x, v.tri_vec[i].vertex[2].y, v.tri_vec[i].vertex[2].z);
+
+			glm::vec3 edge1 = v1 - v0;
+			glm::vec3 edge2 = v2 - v0;
+			glm::vec3 faceNormal = glm::normalize(glm::cross(edge1, edge2));
+
+			// Transform normal by model matrix (use normal matrix for correct transformation)
+			glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(v.model_matrix)));
+			glm::vec3 worldNormal = glm::normalize(normalMatrix * faceNormal);
+
 			for (size_t j = 0; j < 3; j++) {
 				RenderVertex rv;
 
@@ -559,6 +658,9 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 				rv.position[0] = worldPos.x;
 				rv.position[1] = worldPos.y;
 				rv.position[2] = worldPos.z;
+				rv.normal[0] = worldNormal.x;
+				rv.normal[1] = worldNormal.y;
+				rv.normal[2] = worldNormal.z;
 				rv.color[0] = v.tri_vec[i].colour.x;
 				rv.color[1] = v.tri_vec[i].colour.y;
 				rv.color[2] = v.tri_vec[i].colour.z;
@@ -580,13 +682,23 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
 		indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
 
+	// Position attribute
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
 	glEnableVertexAttribArray(0);
+	// Normal attribute
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
 	glEnableVertexAttribArray(1);
+	// Color attribute
+	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(6 * sizeof(float)));
+	glEnableVertexAttribArray(2);
 
 	glBindVertexArray(0);
 }
+
+
+
+
+
 
 // Overload for single voxel object (backwards compatibility)
 void updateTriangleBuffer(voxel_object& v) {

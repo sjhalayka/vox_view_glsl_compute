@@ -376,6 +376,73 @@ void displayFPS()
 
 
 
+
+// ============================================================================
+// Helper function to set light uniforms for a shader program
+// ============================================================================
+
+void setLightUniforms(GLuint program) {
+    glUseProgram(program);
+
+    // Set view position
+    glUniform3fv(glGetUniformLocation(program, "viewPos"), 1, &main_camera.eye.x);
+
+    // Set material properties
+    glUniform1f(glGetUniformLocation(program, "ambientStrength"), globalMaterial.ambient);
+    glUniform1f(glGetUniformLocation(program, "shininess"), globalMaterial.shininess);
+
+    // Count enabled lights
+    int numPoint = 0, numSpot = 0, numDir = 0;
+
+    // Set directional lights
+    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
+        std::string base = "dirLights[" + std::to_string(i) + "].";
+        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(dirLights[i].direction));
+        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(dirLights[i].color));
+        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), dirLights[i].intensity);
+        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), dirLights[i].enabled ? 1 : 0);
+        if (dirLights[i].enabled) numDir++;
+    }
+
+    // Set point lights
+    for (int i = 0; i < MAX_POINT_LIGHTS; i++) {
+        std::string base = "pointLights[" + std::to_string(i) + "].";
+        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(pointLights[i].position));
+        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(pointLights[i].color));
+        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), pointLights[i].intensity);
+        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), pointLights[i].constant);
+        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), pointLights[i].linear);
+        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), pointLights[i].quadratic);
+        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), pointLights[i].enabled ? 1 : 0);
+        if (pointLights[i].enabled) numPoint++;
+    }
+
+    // Set spot lights
+    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
+        std::string base = "spotLights[" + std::to_string(i) + "].";
+        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(spotLights[i].position));
+        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(spotLights[i].direction));
+        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(spotLights[i].color));
+        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), spotLights[i].intensity);
+        glUniform1f(glGetUniformLocation(program, (base + "cutOff").c_str()), spotLights[i].cutOff);
+        glUniform1f(glGetUniformLocation(program, (base + "outerCutOff").c_str()), spotLights[i].outerCutOff);
+        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), spotLights[i].constant);
+        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), spotLights[i].linear);
+        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), spotLights[i].quadratic);
+        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), spotLights[i].enabled ? 1 : 0);
+        if (spotLights[i].enabled) numSpot++;
+    }
+
+    // Set light counts
+    glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
+    glUniform1i(glGetUniformLocation(program, "numPointLights"), numPoint);
+    glUniform1i(glGetUniformLocation(program, "numSpotLights"), numSpot);
+}
+
+
+
+
+
 const char* marchingCubesComputeShader = R"(
 #version 430 core
 
@@ -581,45 +648,152 @@ void main() {
 const char* mcFragmentShaderSource = R"(
 #version 430 core
 
+#define MAX_POINT_LIGHTS 8
+#define MAX_SPOT_LIGHTS 8
+#define MAX_DIR_LIGHTS 4
+
 in vec3 fragPos;
 in vec3 fragNormal;
 
-uniform vec3 viewPos;
-uniform vec4 layerColor;  // RGB + alpha
-uniform vec3 lightDir;
-
 out vec4 FragColor;
 
+// Point Light
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+// Spot Light
+struct SpotLight {
+    vec3 position;
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    float cutOff;
+    float outerCutOff;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+// Directional Light
+struct DirLight {
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    bool enabled;
+};
+
+uniform PointLight pointLights[MAX_POINT_LIGHTS];
+uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
+uniform DirLight dirLights[MAX_DIR_LIGHTS];
+
+uniform int numPointLights;
+uniform int numSpotLights;
+uniform int numDirLights;
+
+uniform vec3 viewPos;
+uniform vec4 layerColor;
+uniform float ambientStrength;
+uniform float shininess;
+
+// Calculate directional light contribution
+vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(-light.direction);
+    
+    // Diffuse (use abs for double-sided)
+    float diff = abs(dot(normal, lightDir));
+    
+    // Specular (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(abs(dot(normal, halfwayDir)), 0.0), shininess);
+    
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.3;
+    
+    return (diffuse + specular) * baseColor;
+}
+
+// Calculate point light contribution
+vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    float diff = abs(dot(normal, lightDir));
+    
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(abs(dot(normal, halfwayDir)), 0.0), shininess);
+    
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.3;
+    
+    return (diffuse + specular) * attenuation * baseColor;
+}
+
+// Calculate spot light contribution
+vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    float diff = abs(dot(normal, lightDir));
+    
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(abs(dot(normal, halfwayDir)), 0.0), shininess);
+    
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    float theta = dot(lightDir, normalize(-light.direction));
+    float epsilon = light.cutOff - light.outerCutOff;
+    float spotIntensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+    
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.3;
+    
+    return (diffuse + specular) * attenuation * spotIntensity * baseColor;
+}
+
 void main() {
-
-    FragColor = layerColor;
-    return;
-
-    //vec3 normal = normalize(fragNormal);
-
-    //// Simple directional lighting
-    //vec3 lightColor = vec3(1.0);
-    //float ambientStrength = 0.3;
-    //vec3 ambient = ambientStrength * lightColor;
-    //
-    //// Diffuse - use abs for double-sided lighting
-    //float diff = abs(dot(normal, normalize(-lightDir)));
-    //vec3 diffuse = diff * lightColor;
-    //
-    //// Specular
-    //vec3 viewDir = normalize(viewPos - fragPos);
-    //vec3 reflectDir = reflect(normalize(lightDir), normal);
-    //float spec = pow(max(abs(dot(viewDir, reflectDir)), 0.0), 32.0);
-    //vec3 specular = 0.3 * spec * lightColor;
-    //
-    //vec3 lighting = ambient + diffuse + specular;
-    //vec3 finalColor = lighting * layerColor.rgb;
-    //
-    //FragColor = vec4(finalColor, layerColor.a);
+    vec3 norm = normalize(fragNormal);
+    vec3 viewDir = normalize(viewPos - fragPos);
+    
+    vec3 baseColor = layerColor.rgb;
+    
+    // Ambient
+    vec3 ambient = ambientStrength * baseColor;
+    vec3 result = ambient;
+    
+    // Directional lights
+    for (int i = 0; i < numDirLights && i < MAX_DIR_LIGHTS; i++) {
+        result += CalcDirLight(dirLights[i], norm, viewDir, baseColor);
+    }
+    
+    // Point lights
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
+        result += CalcPointLight(pointLights[i], norm, fragPos, viewDir, baseColor);
+    }
+    
+    // Spot lights
+    for (int i = 0; i < numSpotLights && i < MAX_SPOT_LIGHTS; i++) {
+        result += CalcSpotLight(spotLights[i], norm, fragPos, viewDir, baseColor);
+    }
+    
+    FragColor = vec4(result, layerColor.a);
 }
 )";
-
-
 
 
 
@@ -1751,26 +1925,193 @@ void main()
 const char* commonVertexShaderSource = R"(
 #version 430 core
 layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 color;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 color;
+
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
-out vec3 fragColor;
+
+out vec3 FragPos;
+out vec3 Normal;
+out vec3 Color;
+
 void main() {
-    fragColor = color;
-    gl_Position = projection * view * model * vec4(position, 1.0);
+    vec4 worldPos = model * vec4(position, 1.0);
+    FragPos = worldPos.xyz;
+    Normal = mat3(transpose(inverse(model))) * normal;
+    Color = color;
+    gl_Position = projection * view * worldPos;
 }
 )";
 
-// Common fragment shader for all primitives
+
+
+
+
 const char* commonFragmentShaderSource = R"(
 #version 430 core
-in vec3 fragColor;
+
+#define MAX_POINT_LIGHTS 8
+#define MAX_SPOT_LIGHTS 8
+#define MAX_DIR_LIGHTS 4
+
+in vec3 FragPos;
+in vec3 Normal;
+in vec3 Color;
+
 out vec4 finalColor;
+
+// Point Light
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+// Spot Light
+struct SpotLight {
+    vec3 position;
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    float cutOff;
+    float outerCutOff;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+// Directional Light
+struct DirLight {
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    bool enabled;
+};
+
+uniform PointLight pointLights[MAX_POINT_LIGHTS];
+uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
+uniform DirLight dirLights[MAX_DIR_LIGHTS];
+
+uniform int numPointLights;
+uniform int numSpotLights;
+uniform int numDirLights;
+
+uniform vec3 viewPos;
+uniform float ambientStrength;
+uniform float shininess;
+
+// Calculate directional light contribution
+vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(-light.direction);
+    
+    // Diffuse shading
+    float diff = max(dot(normal, lightDir), 0.0);
+    
+    // Specular shading (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    
+    // Combine results
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.5;
+    
+    return (diffuse + specular) * baseColor;
+}
+
+// Calculate point light contribution
+vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    
+    // Diffuse shading
+    float diff = max(dot(normal, lightDir), 0.0);
+    
+    // Specular shading (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    
+    // Attenuation
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    // Combine results
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.5;
+    
+    return (diffuse + specular) * attenuation * baseColor;
+}
+
+// Calculate spot light contribution
+vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    
+    // Diffuse shading
+    float diff = max(dot(normal, lightDir), 0.0);
+    
+    // Specular shading (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    
+    // Attenuation
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    // Spotlight intensity (soft edges)
+    float theta = dot(lightDir, normalize(-light.direction));
+    float epsilon = light.cutOff - light.outerCutOff;
+    float spotIntensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+    
+    // Combine results
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.5;
+    
+    return (diffuse + specular) * attenuation * spotIntensity * baseColor;
+}
+
 void main() {
-    finalColor = vec4(fragColor, 1.0);
+    vec3 norm = normalize(Normal);
+    vec3 viewDir = normalize(viewPos - FragPos);
+    
+    // Ambient component
+    vec3 ambient = ambientStrength * Color;
+    
+    // Accumulate lighting from all sources
+    vec3 result = ambient;
+    
+    // Directional lights
+    for (int i = 0; i < numDirLights && i < MAX_DIR_LIGHTS; i++) {
+        result += CalcDirLight(dirLights[i], norm, viewDir, Color);
+    }
+    
+    // Point lights
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
+        result += CalcPointLight(pointLights[i], norm, FragPos, viewDir, Color);
+    }
+    
+    // Spot lights
+    for (int i = 0; i < numSpotLights && i < MAX_SPOT_LIGHTS; i++) {
+        result += CalcSpotLight(spotLights[i], norm, FragPos, viewDir, Color);
+    }
+    
+    finalColor = vec4(result, 1.0);
 }
 )";
+
+
 
 
 
@@ -2463,7 +2804,9 @@ void drawMarchingCubesMesh() {
     glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
     glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
     glUniform3fv(glGetUniformLocation(mcRenderProgram, "viewPos"), 1, &main_camera.eye.x);
-    glUniform3f(glGetUniformLocation(mcRenderProgram, "lightDir"), -0.5f, -1.0f, -0.3f);
+    //glUniform3f(glGetUniformLocation(mcRenderProgram, "lightDir"), -0.5f, -1.0f, -0.3f);
+
+    setLightUniforms(mcRenderProgram);
 
     glBindVertexArray(mcVAO);
 
@@ -2866,14 +3209,18 @@ void draw_triangles_fast(void) {
 
     glm::mat4 identity(1.0f);
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
-
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
+
+    // Set light uniforms
+    setLightUniforms(renderProgram);
 
     glBindVertexArray(triangleVAO);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 }
+
+
 
 void draw_points_fast() {
     if (numSurfacePoints == 0 || renderProgram == 0) return;
@@ -3645,6 +3992,10 @@ int main(int argc, char** argv)
 
     // Update obstacles from voxel collisions
     updateFluidObstacles();
+
+
+    initDefaultLights();
+
 
     // Print controls
     cout << "\n=== FLUID SIMULATION WITH TEMPERATURE, BUOYANCY & GRAVITY ===" << endl;
