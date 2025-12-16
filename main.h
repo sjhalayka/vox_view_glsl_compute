@@ -401,16 +401,16 @@ Material globalMaterial;
 // Initialize default lights
 void initDefaultLights() {
 	// One directional light (sun-like)
-	dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
-	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	dirLights[0].intensity = 0.8f;
-	dirLights[0].enabled = true;
+	//dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
+	//dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	//dirLights[0].intensity = 0.8f;
+	//dirLights[0].enabled = true;
 
 	// One point light
-	//pointLights[0].position = glm::vec3(5.0f, 10.0f, 5.0f);
-	//pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	//pointLights[0].intensity = 1.0f;
-	//pointLights[0].enabled = true;
+	pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	pointLights[0].intensity = 100.0f;
+	pointLights[0].enabled = true;
 }
 
 
