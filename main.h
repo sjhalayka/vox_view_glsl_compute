@@ -401,17 +401,67 @@ Material globalMaterial;
 // Initialize default lights
 void initDefaultLights() {
 	// One directional light (sun-like)
-	dirLights[0].direction = glm::normalize(glm::vec3(-0.5f, -1.0f, -0.3f));
+	dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
 	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
 	dirLights[0].intensity = 0.8f;
 	dirLights[0].enabled = true;
 
 	// One point light
-	pointLights[0].position = glm::vec3(5.0f, 10.0f, 5.0f);
-	pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	pointLights[0].intensity = 1.0f;
-	pointLights[0].enabled = true;
+	//pointLights[0].position = glm::vec3(5.0f, 10.0f, 5.0f);
+	//pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	//pointLights[0].intensity = 1.0f;
+	//pointLights[0].enabled = true;
 }
+
+
+// ============================================================================
+// SHADOW MAPPING STRUCTURES AND GLOBALS
+// ============================================================================
+
+// Shadow map resolution (higher = better quality, more memory)
+const int SHADOW_MAP_SIZE = 2048;
+const int POINT_SHADOW_MAP_SIZE = 1024;  // Cube maps are more expensive
+
+// Shadow map arrays for each light type
+GLuint dirLightShadowMaps[MAX_DIR_LIGHTS] = { 0 };
+GLuint dirLightShadowFBOs[MAX_DIR_LIGHTS] = { 0 };
+glm::mat4 dirLightSpaceMatrices[MAX_DIR_LIGHTS];
+
+GLuint spotLightShadowMaps[MAX_SPOT_LIGHTS] = { 0 };
+GLuint spotLightShadowFBOs[MAX_SPOT_LIGHTS] = { 0 };
+glm::mat4 spotLightSpaceMatrices[MAX_SPOT_LIGHTS];
+
+// Point lights use cube maps for omnidirectional shadows
+GLuint pointLightShadowCubeMaps[MAX_POINT_LIGHTS] = { 0 };
+GLuint pointLightShadowFBOs[MAX_POINT_LIGHTS] = { 0 };
+// 6 view matrices per point light (one for each cube face)
+glm::mat4 pointLightShadowMatrices[MAX_POINT_LIGHTS * 6];
+float pointLightFarPlanes[MAX_POINT_LIGHTS] = { 25.0f }; // Adjustable per light
+
+// Shadow rendering shader programs
+GLuint shadowDepthProgram = 0;           // For directional and spot lights
+GLuint pointShadowDepthProgram = 0;      // For point light cube maps
+
+// Shadow mapping parameters
+struct ShadowParams {
+	float bias = 0.0001f;              // Depth bias to prevent shadow acne
+	float normalBias = 0.0001f;         // Normal-based bias
+	int pcfSamples = 2;               // PCF kernel size (2 = 5x5 samples)
+	bool enableShadows = true;        // Global shadow toggle
+	float shadowIntensity = 0.5f;     // 0 = full shadow, 1 = no shadow effect
+};
+
+ShadowParams shadowParams;
+
+// Function declarations
+void initShadowMaps();
+void cleanupShadowMaps();
+void renderShadowMaps();
+void renderDirLightShadowMap(int lightIndex);
+void renderSpotLightShadowMap(int lightIndex);
+void renderPointLightShadowMap(int lightIndex);
+void setShadowUniforms(GLuint program);
+
 
 
 
