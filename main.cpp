@@ -2578,7 +2578,7 @@ void initShadowMaps() {
 
     // Create cube shadow maps for point lights
     for (int i = 0; i < MAX_POINT_LIGHTS; i++) {
-        pointLightFarPlanes[i] = 25.0f;  // Default far plane
+        pointLightFarPlanes[i] = 100.0f;  // Default far plane
 
         glGenTextures(1, &pointLightShadowCubeMaps[i]);
         glBindTexture(GL_TEXTURE_CUBE_MAP, pointLightShadowCubeMaps[i]);
