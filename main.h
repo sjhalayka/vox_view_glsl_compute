@@ -57,7 +57,7 @@ void cleanup(void);
 custom_math::vector_3 background_colour(0.5f, 0.5f, 0.5f);
 custom_math::vector_3 control_list_colour(1.0f, 1.0f, 1.0f);
 
-bool draw_axis = true;
+bool draw_axis = false;
 bool draw_control_list = true;
 bool draw_triangles_on_screen = true;
 uv_camera main_camera;
@@ -1636,7 +1636,7 @@ GLuint mcNormalVBO = 0;
 const size_t MC_MAX_VERTICES = x_res * y_res * z_res * 5 * 3; // Max 5 triangles per cell
 
 // Toggle for marching cubes vs ray marching
-bool useMarchingCubes = true;
+bool useMarchingCubes = false;
 
 // ============================================================================
 // MARCHING CUBES - Function Declarations
