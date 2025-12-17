@@ -407,10 +407,16 @@ void initDefaultLights() {
 	//dirLights[0].enabled = true;
 
 	// One point light
-	pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	pointLights[0].intensity = 50.0f;
-	pointLights[0].enabled = true;
+	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	//pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	//pointLights[0].intensity = 50.0f;
+	//pointLights[0].enabled = true;
+
+	spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	spotLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
+	spotLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	spotLights[0].intensity = 50.0f;
+	spotLights[0].enabled = true;
 }
 
 
