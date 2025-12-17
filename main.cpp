@@ -1813,6 +1813,8 @@ void main()
 }
 )";
 
+
+
 const char* volumeFragSource = R"(
 #version 430 core
 out vec4 FragColor;
@@ -1824,26 +1826,128 @@ uniform sampler3D obstacleTex;
 
 uniform mat4 invViewProj;
 uniform vec3 cameraPos;
-uniform vec3 gridMin = vec3(-10.0, -10.0, -10.0);
-uniform vec3 gridMax = vec3(10.0, 10.0, 10.0);
-uniform ivec3 gridRes = ivec3(128, 128, 128);
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform ivec3 gridRes;
 
-uniform bool visualizeTemperature = false;
-uniform float densityFactor = 1.0;
-uniform float temperatureThreshold = 1.0;
-uniform float stepSize = 0.2;
-uniform int maxSteps = 128;
+uniform bool visualizeTemperature;
+uniform float densityFactor;
+uniform float temperatureThreshold;
+uniform float stepSize;
+uniform int maxSteps;
 
-vec3 heatColor(float t)
-{
-    // Black -> Red -> Yellow -> White
-    return 5.0*mix(mix(vec3(0.0), vec3(1.0,0.0,0.0), t),
-               mix(vec3(1.0,1.0,0.0), vec3(1.0,1.0,1.0), t*t), smoothstep(0.5, 1.0, t));
+// Lighting uniforms - must match setLightUniforms exactly
+#define MAX_POINT_LIGHTS 8
+#define MAX_SPOT_LIGHTS 8
+#define MAX_DIR_LIGHTS 4
+
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+struct SpotLight {
+    vec3 position;
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    float cutOff;
+    float outerCutOff;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+struct DirLight {
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    bool enabled;
+};
+
+uniform PointLight pointLights[MAX_POINT_LIGHTS];
+uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
+uniform DirLight dirLights[MAX_DIR_LIGHTS];
+
+// These are counts of enabled lights, but we iterate over ALL and check enabled flag
+uniform int numPointLights;
+uniform int numSpotLights;
+uniform int numDirLights;
+
+// Volume lighting parameters
+uniform float volumeAbsorption;
+uniform float volumeScattering;
+uniform int shadowSamples;
+uniform float shadowStepMultiplier;
+uniform float phaseG;
+uniform bool enableVolumeShadows;
+uniform bool enableVolumeLighting;
+uniform vec3 ambientLight;
+
+// Simplified phase function - less aggressive normalization
+float phaseHG(float cosTheta, float g) {
+    if (abs(g) < 0.001) return 1.0; // Isotropic
+    float g2 = g * g;
+    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
+}
+
+// Sample density at a world position
+float sampleDensity(vec3 worldPos) {
+    vec3 uvw = (worldPos - gridMin) / (gridMax - gridMin);
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+        return 0.0;
+    }
+    float obs = texture(obstacleTex, uvw).r;
+    if (obs > 0.5) return 0.0;
+    return texture(densityTex, uvw).r;
+}
+
+// March toward light to compute transmittance (self-shadowing)
+float lightTransmittance(vec3 pos, vec3 lightDir, float maxDist) {
+    if (!enableVolumeShadows) return 1.0;
+    
+    float shadowStep = stepSize * shadowStepMultiplier;
+    float transmittance = 1.0;
+    float t = shadowStep;
+    
+    int steps = min(shadowSamples, int(maxDist / shadowStep));
+    for (int i = 0; i < steps; i++) {
+        vec3 samplePos = pos + lightDir * t;
+        float density = sampleDensity(samplePos);
+        
+        if (density > 0.001) {
+            transmittance *= exp(-volumeAbsorption * density * shadowStep);
+            if (transmittance < 0.01) break;
+        }
+        t += shadowStep;
+    }
+    return transmittance;
+}
+
+// Calculate distance to volume boundary along direction
+float distToBoundary(vec3 pos, vec3 dir) {
+    vec3 invDir = 1.0 / (dir + vec3(0.0001)); // Avoid division by zero
+    vec3 t0 = (gridMin - pos) * invDir;
+    vec3 t1 = (gridMax - pos) * invDir;
+    vec3 tmax = max(t0, t1);
+    return max(0.0, min(min(tmax.x, tmax.y), tmax.z));
+}
+
+vec3 heatColor(float t) {
+    return 5.0 * mix(mix(vec3(0.0), vec3(1.0, 0.0, 0.0), t),
+               mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), t*t), smoothstep(0.5, 1.0, t));
 }
 
 void main()
 {
-    // Ray origin and direction in world space
+    // Ray origin and direction
     vec4 near = vec4(vTexCoord * 2.0 - 1.0, -1.0, 1.0);
     vec4 far  = vec4(vTexCoord * 2.0 - 1.0,  1.0, 1.0);
     vec4 nearWorld = invViewProj * near;
@@ -1854,7 +1958,7 @@ void main()
     vec3 rayOrigin = nearWorld.xyz;
     vec3 rayDir = normalize(farWorld.xyz - nearWorld.xyz);
 
-    // Bounding box intersection
+    // Box intersection
     vec3 invDir = 1.0 / rayDir;
     vec3 t0 = (gridMin - rayOrigin) * invDir;
     vec3 t1 = (gridMax - rayOrigin) * invDir;
@@ -1871,7 +1975,7 @@ void main()
     float t = tenter;
     vec3 pos = rayOrigin + rayDir * t;
 
-    vec4 color = vec4(0.0);
+    vec3 accumulatedColor = vec3(0.0);
     float transmittance = 1.0;
 
     for (int i = 0; i < maxSteps && t < texit; ++i)
@@ -1879,12 +1983,7 @@ void main()
         vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
 
         float obs = texture(obstacleTex, uvw).r;
-        if (obs > 0.5) {
-            // Hit solid voxel obstacle - stop marching entirely
-            // Optional: tint with voxel color if you want solids visible through thin fluid
-            // But for pure occlusion, just break
-            break;
-        }
+        if (obs > 0.5) break;
 
         float density = texture(densityTex, uvw).r;
         float temp = texture(temperatureTex, uvw).r;
@@ -1894,26 +1993,100 @@ void main()
 
         if (sampleValue > 0.01)
         {
-            float absorption = densityFactor * sampleValue * stepSize;
-            vec3 emitColor = visualizeTemperature ?
-                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);  // smoke color
+            // Base color
+            vec3 baseColor = visualizeTemperature ?
+                heatColor(sampleValue * 0.1) : vec3(0.9, 0.9, 0.95);
 
-            vec3 absorbed = exp(-absorption * vec3(1.0));
-            vec3 contrib = (1.0 - absorbed) * emitColor;
+            vec3 lightContrib = vec3(0.0);
+            
+            if (enableVolumeLighting) {
+                // Ambient contribution
+                lightContrib = ambientLight * baseColor;
+                
+                // Directional lights - iterate over ALL, check enabled flag
+                for (int d = 0; d < MAX_DIR_LIGHTS; d++) {
+                    if (!dirLights[d].enabled) continue;
+                    
+                    vec3 lightDir = normalize(-dirLights[d].direction);
+                    float maxDist = distToBoundary(pos, lightDir);
+                    float lightTrans = lightTransmittance(pos, lightDir, maxDist);
+                    
+                    float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
+                    lightContrib += dirLights[d].color * dirLights[d].intensity * 
+                                   phase * lightTrans * volumeScattering * baseColor;
+                }
+                
+                // Point lights - iterate over ALL, check enabled flag
+                for (int p = 0; p < MAX_POINT_LIGHTS; p++) {
+                    if (!pointLights[p].enabled) continue;
+                    
+                    vec3 toLight = pointLights[p].position - pos;
+                    float dist = length(toLight);
+                    vec3 lightDir = toLight / dist;
+                    
+                    // Softer attenuation for volumetrics
+                    float attenuation = pointLights[p].intensity / 
+                        (pointLights[p].constant + 
+                         pointLights[p].linear * dist + 
+                         pointLights[p].quadratic * dist * dist);
+                    
+                    float lightTrans = lightTransmittance(pos, lightDir, dist);
+                    float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
+                    
+                    lightContrib += pointLights[p].color * attenuation * 
+                                   phase * lightTrans * volumeScattering * baseColor;
+                }
+                
+                // Spot lights - iterate over ALL, check enabled flag
+                for (int s = 0; s < MAX_SPOT_LIGHTS; s++) {
+                    if (!spotLights[s].enabled) continue;
+                    
+                    vec3 toLight = spotLights[s].position - pos;
+                    float dist = length(toLight);
+                    vec3 lightDir = toLight / dist;
+                    
+                    // Spotlight cone check
+                    float theta = dot(lightDir, normalize(-spotLights[s].direction));
+                    float epsilon = spotLights[s].cutOff - spotLights[s].outerCutOff;
+                    float spotEffect = clamp((theta - spotLights[s].outerCutOff) / epsilon, 0.0, 1.0);
+                    
+                    if (spotEffect > 0.0) {
+                        float attenuation = spotLights[s].intensity / 
+                            (spotLights[s].constant + 
+                             spotLights[s].linear * dist + 
+                             spotLights[s].quadratic * dist * dist);
+                        
+                        float lightTrans = lightTransmittance(pos, lightDir, dist);
+                        float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
+                        
+                        lightContrib += spotLights[s].color * attenuation * spotEffect *
+                                       phase * lightTrans * volumeScattering * baseColor;
+                    }
+                }
+            } else {
+                // No lighting - just use base color
+                lightContrib = baseColor;
+            }
 
-            color.rgb += transmittance * contrib;
-            color.a += (1.0 - absorbed.x) * transmittance;
-            transmittance *= absorbed.x;
+            // Beer-Lambert absorption
+            float absorption = volumeAbsorption * sampleValue * stepSize;
+            float sampleTrans = exp(-absorption);
+            
+            accumulatedColor += transmittance * (1.0 - sampleTrans) * lightContrib;
+            transmittance *= sampleTrans;
 
-            if (transmittance < 0.01) break;  // early termination for opacity
+            if (transmittance < 0.01) break;
         }
 
         t += stepSize;
         pos = rayOrigin + rayDir * t;
     }
 
-    color.rgb += transmittance * vec3(0.1, 0.15, 0.2); // Ambient background
-    FragColor = color;
+    // Background
+    vec3 backgroundColor = vec3(0.1, 0.15, 0.2);
+    accumulatedColor += transmittance * backgroundColor;
+    
+    FragColor = vec4(accumulatedColor, 1.0 - transmittance);
 }
 )";
 
@@ -3570,14 +3743,14 @@ void draw_fluid_fast() {
         drawMarchingCubesMesh();
     }
     else {
-        // Original ray marching code (keep as fallback)
-        // ... your existing ray marching code here ...
+        // Ray marching with lighting
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         glUseProgram(volumeRenderProgram);
 
+        // Bind textures
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_3D, densityTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "densityTex"), 0);
@@ -3590,6 +3763,7 @@ void draw_fluid_fast() {
         glBindTexture(GL_TEXTURE_3D, obstacleTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "obstacleTex"), 2);
 
+        // Camera and grid uniforms
         glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
         glm::mat4 invViewProj = glm::inverse(viewProj);
 
@@ -3599,6 +3773,25 @@ void draw_fluid_fast() {
         glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
         glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"), x_res, y_res, z_res);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"), fluidParams.visualizeTemperature ? 1 : 0);
+
+        // Ray marching parameters
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "densityFactor"), 1.0f);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "temperatureThreshold"), 1.0f);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "stepSize"), 0.15f);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "maxSteps"), 256);
+
+        // Volume lighting parameters
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeAbsorption"), fluidParams.volumeAbsorption);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeScattering"), fluidParams.volumeScattering);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "shadowSamples"), fluidParams.shadowSamples);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "shadowStepMultiplier"), fluidParams.shadowStepMultiplier);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "phaseG"), fluidParams.phaseG);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeShadows"), fluidParams.enableVolumeShadows ? 1 : 0);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeLighting"), fluidParams.enableVolumeLighting ? 1 : 0);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "ambientLight"), 0.15f, 0.15f, 0.2f);
+
+        // Set light uniforms (reuse existing function)
+        setLightUniforms(volumeRenderProgram);
 
         glBindVertexArray(fullscreenVAO);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -4100,25 +4293,6 @@ void keyboard_func(unsigned char key, int x, int y)
 {
     switch (tolower(key))
     {
-    case '9':
-        shadowParams.normalBias = shadowParams.normalBias * 2.0f;
-        cout << "normalBias bias: " << shadowParams.normalBias << endl;
-        break;
-
-    case '0':
-        shadowParams.normalBias = shadowParams.normalBias / 2.0f;
-        cout << "normalBias bias: " << shadowParams.normalBias << endl;
-        break;
-
-    case '-':
-        shadowParams.shadowIntensity = std::max(0.0f, shadowParams.shadowIntensity - 0.1f);
-        cout << "Shadow intensity: " << shadowParams.shadowIntensity << endl;
-        break;
-
-    case '=':
-        shadowParams.shadowIntensity = std::min(1.0f, shadowParams.shadowIntensity + 0.1f);
-        cout << "Shadow intensity: " << shadowParams.shadowIntensity << endl;
-        break;
 
 
 
@@ -4149,266 +4323,64 @@ void keyboard_func(unsigned char key, int x, int y)
         cout << "Fluid simulation: " << (fluidSimEnabled ? "ON" : "OFF") << endl;
         break;
 
-        // Reset fluid
-    //case 'c':
-    //    if (fluidInitialized) {
-    //        size_t gridSize = x_res * y_res * z_res;
-    //        vector<float> zeroDensity(gridSize, 0.0f);
-    //        vector<float> ambientTemp(gridSize, fluidParams.ambientTemperature);
-    //        vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
-
-    //        for (int i = 0; i < 2; i++) {
-    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[i]);
-    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroDensity.data());
-
-    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
-    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(glm::vec4), zeroVelocity.data());
-
-    //            // Reset temperature to ambient
-    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
-    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), ambientTemp.data());
-    //        }
-
-    //        // Reset blackening state
-    //        if (!vo.voxel_original_colours.empty()) {
-    //            vo.voxel_colours = vo.voxel_original_colours;
-    //            fill(vo.voxel_blacken_times.begin(), vo.voxel_blacken_times.end(), -1.0f);
-    //            vo.tri_vec.clear();
-    //            get_triangles(vo.tri_vec, vo);
-    //            updateTriangleBuffer(vo);
-    //        }
-
-    //        simulationStartTime = std::chrono::steady_clock::now();  // Reset clock
-
-    //        cout << "Fluid reset (including temperature and blackening)" << endl;
-    //    }
-    //    break;
-
-        // Adjust viscosity
-    case '[':
-        fluidParams.viscosity *= 0.5f;
-        cout << "Viscosity: " << fluidParams.viscosity << endl;
+ 
+    case 'l':
+        fluidParams.enableVolumeLighting = !fluidParams.enableVolumeLighting;
+        cout << "Volume lighting: " << (fluidParams.enableVolumeLighting ? "ON" : "OFF") << endl;
         break;
-    case ']':
-        fluidParams.viscosity *= 2.0f;
-        cout << "Viscosity: " << fluidParams.viscosity << endl;
-        break;
-
-        // Adjust injection radius
-    case ',':
-        injectRadius = std::max(1, injectRadius - 1);
-        cout << "Injection radius: " << injectRadius << endl;
-        break;
-    case '.':
-        injectRadius = std::min(10, injectRadius + 1);
-        cout << "Injection radius: " << injectRadius << endl;
-        break;
-
-        // ========================================
-        // NEW: Temperature and Buoyancy Controls
-        // ========================================
-
-        // Toggle gravity
-    case 'g':
-        fluidParams.enableGravity = !fluidParams.enableGravity;
-        cout << "Gravity: " << (fluidParams.enableGravity ? "ON" : "OFF") << endl;
-        break;
-
-        // Toggle buoyancy
-    case 'y':
-        fluidParams.enableBuoyancy = !fluidParams.enableBuoyancy;
-        cout << "Buoyancy: " << (fluidParams.enableBuoyancy ? "ON" : "OFF") << endl;
-        break;
-
-        // Toggle temperature visualization
-    case 'v':
-        fluidParams.visualizeTemperature = !fluidParams.visualizeTemperature;
-        cout << "Visualize temperature: " << (fluidParams.visualizeTemperature ? "ON" : "OFF") << endl;
-        break;
-
-        // Adjust buoyancy alpha (density sinking)
-    case '1':
-        fluidParams.buoyancyAlpha = std::max(0.0f, fluidParams.buoyancyAlpha - 0.01f);
-        cout << "Buoyancy Alpha (density): " << fluidParams.buoyancyAlpha << endl;
-        break;
-    case '2':
-        fluidParams.buoyancyAlpha = std::min(1.0f, fluidParams.buoyancyAlpha + 0.01f);
-        cout << "Buoyancy Alpha (density): " << fluidParams.buoyancyAlpha << endl;
-        break;
-
-        // Adjust buoyancy beta (temperature rising)
-    case '3':
-        fluidParams.buoyancyBeta = std::max(0.0f, fluidParams.buoyancyBeta - 0.1f);
-        cout << "Buoyancy Beta (temperature): " << fluidParams.buoyancyBeta << endl;
-        break;
-    case '4':
-        fluidParams.buoyancyBeta = std::min(5.0f, fluidParams.buoyancyBeta + 0.1f);
-        cout << "Buoyancy Beta (temperature): " << fluidParams.buoyancyBeta << endl;
-        break;
-
-        // Adjust temperature amount
-    case '5':
-        fluidParams.temperatureAmount = std::max(0.0f, fluidParams.temperatureAmount - 1.0f);
-        cout << "Temperature injection amount: " << fluidParams.temperatureAmount << endl;
-        break;
-    case '6':
-        fluidParams.temperatureAmount = std::min(50.0f, fluidParams.temperatureAmount + 1.0f);
-        cout << "Temperature injection amount: " << fluidParams.temperatureAmount << endl;
-        break;
-
-        // Adjust gravity strength
-    case '7':
-        fluidParams.gravity = std::max(0.0f, fluidParams.gravity - 1.0f);
-        cout << "Gravity: " << fluidParams.gravity << endl;
-        break;
-    case '8':
-        fluidParams.gravity = std::min(50.0f, fluidParams.gravity + 1.0f);
-        cout << "Gravity: " << fluidParams.gravity << endl;
-        break;
-
-
 
     case 'o':
-    {
-        // Assuming you want to operate on a specifi c voxel object, e.g., voxel_objects[0]
-        voxel_object& vo = voxel_objects[0];  // or whichever object you want to transform
-
-        vo.u += 0.1f;
-        vo.model_matrix = glm::mat4(1.0f);
-
-        vo.model_matrix = glm::translate(vo.model_matrix, voxelFiles[0].location);
-
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-        get_background_points_GPU(voxel_objects);
-        updateTriangleBuffer(voxel_objects);
-
-//        updateSurfacePointsForRendering(vo);
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float, std::milli> elapsed = end - start;
-        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-
-
+        fluidParams.enableVolumeShadows = !fluidParams.enableVolumeShadows;
+        cout << "Volume shadows: " << (fluidParams.enableVolumeShadows ? "ON" : "OFF") << endl;
         break;
-    }
 
-
-
-
-
-
-
-
-
-
-
-
-
-    //case 'o':
-    //{
-    //    vo.u += 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-    //case 'p':
-    //{
-    //    vo.u -= 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-    //case 'k':
-    //{
-    //    vo.v += 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-    //case 'l':
-    //{
-    //    vo.v -= 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-
-
-
-    // Print controls
-    case 'h':
-        cout << "\n=== CONTROLS ===" << endl;
-        cout << "F: Toggle fluid simulation" << endl;
-        cout << "C: Clear/reset fluid" << endl;
-        cout << "Middle Mouse + Drag: Inject density and velocity" << endl;
-        cout << "Shift + Middle Mouse: Inject density only" << endl;
-        cout << "[/]: Decrease/increase viscosity" << endl;
-        cout << "-/=: Decrease/increase turbulence (Smagorinsky constant)" << endl;
-        cout << ",/.: Decrease/increase injection radius" << endl;
-        cout << "\n=== NEW: TEMPERATURE & BUOYANCY ===" << endl;
-        cout << "G: Toggle gravity" << endl;
-        cout << "Y: Toggle buoyancy" << endl;
-        cout << "V: Toggle temperature visualization" << endl;
-        cout << "1/2: Decrease/increase buoyancy alpha (density sinking)" << endl;
-        cout << "3/4: Decrease/increase buoyancy beta (temperature rising)" << endl;
-        cout << "5/6: Decrease/increase temperature injection" << endl;
-        cout << "7/8: Decrease/increase gravity strength" << endl;
-        cout << "\n=== OTHER ===" << endl;
-        cout << "O/P: Rotate voxel object Y-axis" << endl;
-        cout << "K/L: Rotate voxel object X-axis" << endl;
-        cout << "T: Toggle triangle mesh" << endl;
-        cout << "W: Toggle axes" << endl;
-        cout << "R: Toggle real-time rotation" << endl;
-        cout << "M: Take screenshot" << endl;
-        cout << "H: Show this help" << endl;
-        cout << "================\n" << endl;
+    case '[':
+        fluidParams.volumeScattering = glm::max(0.0f, fluidParams.volumeScattering - 0.1f);
+        cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
         break;
+
+    case ']':
+        fluidParams.volumeScattering = glm::min(1.0f, fluidParams.volumeScattering + 0.1f);
+        cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
+        break;
+
+
+
+//
+//    case 'o':
+//    {
+//        // Assuming you want to operate on a specifi c voxel object, e.g., voxel_objects[0]
+//        voxel_object& vo = voxel_objects[0];  // or whichever object you want to transform
+//
+//        vo.u += 0.1f;
+//        vo.model_matrix = glm::mat4(1.0f);
+//
+//        vo.model_matrix = glm::translate(vo.model_matrix, voxelFiles[0].location);
+//
+//        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+//        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+//
+//        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+//        get_background_points_GPU(voxel_objects);
+//        updateTriangleBuffer(voxel_objects);
+//
+////        updateSurfacePointsForRendering(vo);
+//        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+//        std::chrono::duration<float, std::milli> elapsed = end - start;
+//        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+//
+//
+//        break;
+//    }
+//
+
+
+
+
+
+
+
+
 
     default:
         break;

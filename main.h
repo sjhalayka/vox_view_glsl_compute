@@ -158,6 +158,16 @@ struct FluidParams {
 
 	// Visualization
 	bool visualizeTemperature = false;    // Show temperature instead of density
+
+	// Volume lighting parameters
+	float volumeAbsorption = 1.0f;           // How much light is absorbed per unit density
+	float volumeScattering = 0.8f;           // Scattering coefficient (0-1)
+	int shadowSamples = 16;                   // Number of samples for self-shadowing
+	float shadowStepMultiplier = 2.0f;        // Larger steps for shadow rays (performance)
+	float phaseG = 0.0f;                      // Phase function asymmetry (-1 to 1, 0 = isotropic)
+	bool enableVolumeShadows = true;          // Toggle volume self-shadowing
+	bool enableVolumeLighting = true;         // Toggle volume lighting
+
 };
 
 FluidParams fluidParams;
@@ -401,10 +411,10 @@ Material globalMaterial;
 // Initialize default lights
 void initDefaultLights() {
 	// One directional light (sun-like)
-	//dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
-	//dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	//dirLights[0].intensity = 0.8f;
-	//dirLights[0].enabled = true;
+	dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
+	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	dirLights[0].intensity = 0.8f;
+	dirLights[0].enabled = true;
 
 	// One point light
 	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
@@ -412,11 +422,11 @@ void initDefaultLights() {
 	//pointLights[0].intensity = 50.0f;
 	//pointLights[0].enabled = true;
 
-	spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	spotLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
-	spotLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	spotLights[0].intensity = 50.0f;
-	spotLights[0].enabled = true;
+	//spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	//spotLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
+	//spotLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	//spotLights[0].intensity = 50.0f;
+	//spotLights[0].enabled = true;
 }
 
 
