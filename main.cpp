@@ -1815,6 +1815,8 @@ void main()
 
 
 
+
+
 const char* volumeFragSource = R"(
 #version 430 core
 out vec4 FragColor;
@@ -1836,7 +1838,6 @@ uniform float temperatureThreshold;
 uniform float stepSize;
 uniform int maxSteps;
 
-// Lighting uniforms - must match setLightUniforms exactly
 #define MAX_POINT_LIGHTS 8
 #define MAX_SPOT_LIGHTS 8
 #define MAX_DIR_LIGHTS 4
@@ -1875,30 +1876,26 @@ uniform PointLight pointLights[MAX_POINT_LIGHTS];
 uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
 uniform DirLight dirLights[MAX_DIR_LIGHTS];
 
-// These are counts of enabled lights, but we iterate over ALL and check enabled flag
 uniform int numPointLights;
 uniform int numSpotLights;
 uniform int numDirLights;
 
-// Volume lighting parameters
 uniform float volumeAbsorption;
 uniform float volumeScattering;
 uniform int shadowSamples;
-uniform float shadowStepMultiplier;
+uniform float shadowDensityScale;  // NEW: separate density multiplier for shadows
 uniform float phaseG;
 uniform bool enableVolumeShadows;
 uniform bool enableVolumeLighting;
 uniform vec3 ambientLight;
 
-// Simplified phase function - less aggressive normalization
 float phaseHG(float cosTheta, float g) {
-    if (abs(g) < 0.001) return 1.0; // Isotropic
+    if (abs(g) < 0.001) return 1.0;
     float g2 = g * g;
     float denom = 1.0 + g2 - 2.0 * g * cosTheta;
     return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
 }
 
-// Sample density at a world position
 float sampleDensity(vec3 worldPos) {
     vec3 uvw = (worldPos - gridMin) / (gridMax - gridMin);
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
@@ -1909,31 +1906,32 @@ float sampleDensity(vec3 worldPos) {
     return texture(densityTex, uvw).r;
 }
 
-// March toward light to compute transmittance (self-shadowing)
+// Fixed shadow ray marching
 float lightTransmittance(vec3 pos, vec3 lightDir, float maxDist) {
     if (!enableVolumeShadows) return 1.0;
     
-    float shadowStep = stepSize * shadowStepMultiplier;
-    float transmittance = 1.0;
-    float t = shadowStep;
+    // Use smaller steps for shadows to catch detail
+    float shadowStep = stepSize * 0.5;  // Half the view ray step size
+    float opticalDepth = 0.0;
     
-    int steps = min(shadowSamples, int(maxDist / shadowStep));
-    for (int i = 0; i < steps; i++) {
+    // March toward the light
+    for (int i = 0; i < shadowSamples; i++) {
+        float t = shadowStep * float(i + 1);
+        if (t >= maxDist) break;
+        
         vec3 samplePos = pos + lightDir * t;
         float density = sampleDensity(samplePos);
         
-        if (density > 0.001) {
-            transmittance *= exp(-volumeAbsorption * density * shadowStep);
-            if (transmittance < 0.01) break;
-        }
-        t += shadowStep;
+        // Accumulate optical depth
+        opticalDepth += density * shadowStep * shadowDensityScale;
     }
-    return transmittance;
+    
+    // Convert optical depth to transmittance
+    return exp(-opticalDepth);
 }
 
-// Calculate distance to volume boundary along direction
 float distToBoundary(vec3 pos, vec3 dir) {
-    vec3 invDir = 1.0 / (dir + vec3(0.0001)); // Avoid division by zero
+    vec3 invDir = 1.0 / (dir + vec3(0.0001));
     vec3 t0 = (gridMin - pos) * invDir;
     vec3 t1 = (gridMax - pos) * invDir;
     vec3 tmax = max(t0, t1);
@@ -1947,7 +1945,6 @@ vec3 heatColor(float t) {
 
 void main()
 {
-    // Ray origin and direction
     vec4 near = vec4(vTexCoord * 2.0 - 1.0, -1.0, 1.0);
     vec4 far  = vec4(vTexCoord * 2.0 - 1.0,  1.0, 1.0);
     vec4 nearWorld = invViewProj * near;
@@ -1958,7 +1955,6 @@ void main()
     vec3 rayOrigin = nearWorld.xyz;
     vec3 rayDir = normalize(farWorld.xyz - nearWorld.xyz);
 
-    // Box intersection
     vec3 invDir = 1.0 / rayDir;
     vec3 t0 = (gridMin - rayOrigin) * invDir;
     vec3 t1 = (gridMax - rayOrigin) * invDir;
@@ -1993,17 +1989,15 @@ void main()
 
         if (sampleValue > 0.01)
         {
-            // Base color
             vec3 baseColor = visualizeTemperature ?
                 heatColor(sampleValue * 0.1) : vec3(0.9, 0.9, 0.95);
 
             vec3 lightContrib = vec3(0.0);
             
             if (enableVolumeLighting) {
-                // Ambient contribution
                 lightContrib = ambientLight * baseColor;
                 
-                // Directional lights - iterate over ALL, check enabled flag
+                // Directional lights
                 for (int d = 0; d < MAX_DIR_LIGHTS; d++) {
                     if (!dirLights[d].enabled) continue;
                     
@@ -2016,7 +2010,7 @@ void main()
                                    phase * lightTrans * volumeScattering * baseColor;
                 }
                 
-                // Point lights - iterate over ALL, check enabled flag
+                // Point lights
                 for (int p = 0; p < MAX_POINT_LIGHTS; p++) {
                     if (!pointLights[p].enabled) continue;
                     
@@ -2024,7 +2018,6 @@ void main()
                     float dist = length(toLight);
                     vec3 lightDir = toLight / dist;
                     
-                    // Softer attenuation for volumetrics
                     float attenuation = pointLights[p].intensity / 
                         (pointLights[p].constant + 
                          pointLights[p].linear * dist + 
@@ -2037,7 +2030,7 @@ void main()
                                    phase * lightTrans * volumeScattering * baseColor;
                 }
                 
-                // Spot lights - iterate over ALL, check enabled flag
+                // Spot lights
                 for (int s = 0; s < MAX_SPOT_LIGHTS; s++) {
                     if (!spotLights[s].enabled) continue;
                     
@@ -2045,7 +2038,6 @@ void main()
                     float dist = length(toLight);
                     vec3 lightDir = toLight / dist;
                     
-                    // Spotlight cone check
                     float theta = dot(lightDir, normalize(-spotLights[s].direction));
                     float epsilon = spotLights[s].cutOff - spotLights[s].outerCutOff;
                     float spotEffect = clamp((theta - spotLights[s].outerCutOff) / epsilon, 0.0, 1.0);
@@ -2064,11 +2056,9 @@ void main()
                     }
                 }
             } else {
-                // No lighting - just use base color
                 lightContrib = baseColor;
             }
 
-            // Beer-Lambert absorption
             float absorption = volumeAbsorption * sampleValue * stepSize;
             float sampleTrans = exp(-absorption);
             
@@ -2082,13 +2072,13 @@ void main()
         pos = rayOrigin + rayDir * t;
     }
 
-    // Background
     vec3 backgroundColor = vec3(0.1, 0.15, 0.2);
     accumulatedColor += transmittance * backgroundColor;
     
     FragColor = vec4(accumulatedColor, 1.0 - transmittance);
 }
 )";
+
 
 
 
@@ -3784,7 +3774,7 @@ void draw_fluid_fast() {
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeAbsorption"), fluidParams.volumeAbsorption);
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeScattering"), fluidParams.volumeScattering);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "shadowSamples"), fluidParams.shadowSamples);
-        glUniform1f(glGetUniformLocation(volumeRenderProgram, "shadowStepMultiplier"), fluidParams.shadowStepMultiplier);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "shadowDensityScale"), fluidParams.shadowDensityScale);
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "phaseG"), fluidParams.phaseG);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeShadows"), fluidParams.enableVolumeShadows ? 1 : 0);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeLighting"), fluidParams.enableVolumeLighting ? 1 : 0);
@@ -4294,7 +4284,15 @@ void keyboard_func(unsigned char key, int x, int y)
     switch (tolower(key))
     {
 
+    case ';':
+        fluidParams.shadowDensityScale = glm::max(0.5f, fluidParams.shadowDensityScale - 0.5f);
+        cout << "Shadow density scale: " << fluidParams.shadowDensityScale << endl;
+        break;
 
+    case '\'':
+        fluidParams.shadowDensityScale = glm::min(20.0f, fluidParams.shadowDensityScale + 0.5f);
+        cout << "Shadow density scale: " << fluidParams.shadowDensityScale << endl;
+        break;
 
     case 'i':  // Toggle between marching cubes and ray marching
         useMarchingCubes = !useMarchingCubes;
