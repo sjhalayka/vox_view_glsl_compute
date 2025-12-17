@@ -2699,11 +2699,12 @@ void renderSpotLightShadowMap(int lightIndex) {
     glUniformMatrix4fv(glGetUniformLocation(shadowDepthProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
 
     glEnable(GL_DEPTH_TEST);
-    glCullFace(GL_FRONT);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);  // slope factor, constant bias
 
     renderSceneForShadows(shadowDepthProgram);
 
-    glCullFace(GL_BACK);
+    glDisable(GL_POLYGON_OFFSET_FILL);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -2754,7 +2755,12 @@ void renderPointLightShadowMap(int lightIndex) {
 
     glEnable(GL_DEPTH_TEST);
 
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);  // slope factor, constant bias
+
     renderSceneForShadows(pointShadowDepthProgram);
+
+    glDisable(GL_POLYGON_OFFSET_FILL);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
