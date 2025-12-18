@@ -341,6 +341,7 @@ struct PointLight {
 	glm::vec3 position;
 	float intensity;
 	glm::vec3 color;
+	bool enabled;  // NEW: Toggle light on/off
 
 	// Shadow map data
 	GLuint depthCubemap;
@@ -348,8 +349,8 @@ struct PointLight {
 	float nearPlane;
 	float farPlane;
 
-	PointLight() : position(1.0f, 1.0f, 1.0f), intensity(1.0f), color(1.0f, 1.0f, 1.0f),
-		depthCubemap(0), shadowFBO(0), nearPlane(0.1f), farPlane(10000.0f) {
+	PointLight() : position(20.0f, 20.0f, 20.0f), intensity(1.0f), color(1.0f, 1.0f, 1.0f),
+		enabled(true), depthCubemap(0), shadowFBO(0), nearPlane(0.1f), farPlane(100.0f) {
 	}
 };
 

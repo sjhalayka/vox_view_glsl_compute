@@ -1794,6 +1794,7 @@ uniform vec3 lightPositions[MAX_POINT_LIGHTS];
 uniform float lightIntensities[MAX_POINT_LIGHTS];
 uniform vec3 lightColors[MAX_POINT_LIGHTS];
 uniform float lightFarPlanes[MAX_POINT_LIGHTS];
+uniform int lightEnabled[MAX_POINT_LIGHTS];  // NEW: 1 = enabled, 0 = disabled
 
 // Shadow cubemaps
 uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
@@ -1868,9 +1869,13 @@ void main() {
     // Start with ambient light
     vec3 result = ambientColor * ambientStrength * fragColor;
     
-    // Process each point light
-    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; ++i) {
-        vec3 lightDir = lightPositions[i] - fragWorldPos;
+// Process each point light
+for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; ++i) {
+    // Skip disabled lights
+    if (lightEnabled[i] == 0) continue;
+    
+    vec3 lightDir = lightPositions[i] - fragWorldPos;
+
         float distance = length(lightDir);
         lightDir = normalize(lightDir);
         
@@ -2103,6 +2108,9 @@ void renderShadowMaps() {
     // For each point light, render the scene to its shadow cubemap
     for (size_t lightIdx = 0; lightIdx < pointLights.size(); ++lightIdx) {
         PointLight& light = pointLights[lightIdx];
+
+        // Skip disabled lights - no need to render their shadow maps
+        if (!light.enabled) continue;
 
         glBindFramebuffer(GL_FRAMEBUFFER, light.shadowFBO);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -3256,12 +3264,18 @@ void draw_triangles_fast(void) {
         prefix = "lightFarPlanes[" + std::to_string(i) + "]";
         glUniform1f(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].farPlane);
 
+        // NEW: Pass enabled state (as int: 1 or 0)
+        prefix = "lightEnabled[" + std::to_string(i) + "]";
+        glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].enabled ? 1 : 0);
+
         // Bind shadow cubemap
         glActiveTexture(GL_TEXTURE0 + i);
         glBindTexture(GL_TEXTURE_CUBE_MAP, pointLights[i].depthCubemap);
         prefix = "shadowMaps[" + std::to_string(i) + "]";
         glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()), i);
     }
+
+
 
     glBindVertexArray(triangleVAO);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
@@ -3522,7 +3536,21 @@ void idle_func(void) {
             mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
             addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
             lastMouseWorldPos = currentMouseWorldPos;
+
+            if (pointLights.size() < 2)
+                addPointLight(currentMouseWorldPos, 500.0, glm::vec3(1.0, 0.0, 0.0));
+            else
+            {
+                pointLights[1].position = currentMouseWorldPos;
+                pointLights[1].enabled = true;
+            }
         }
+        else
+        {
+            if (pointLights.size() == 2)
+                pointLights[1].enabled = false;
+        }
+
 
         // Detect fluid-obstacle collisions
         static const int COLLISION_INTERVAL_MS = 100;
