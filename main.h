@@ -57,7 +57,7 @@ void cleanup(void);
 custom_math::vector_3 background_colour(0.5f, 0.5f, 0.5f);
 custom_math::vector_3 control_list_colour(1.0f, 1.0f, 1.0f);
 
-bool draw_axis = false;
+bool draw_axis = true;
 bool draw_control_list = true;
 bool draw_triangles_on_screen = true;
 uv_camera main_camera;
@@ -158,16 +158,6 @@ struct FluidParams {
 
 	// Visualization
 	bool visualizeTemperature = false;    // Show temperature instead of density
-
-	// Volume lighting parameters
-	float volumeAbsorption = 1.0f;           // How much light is absorbed per unit density
-	float volumeScattering = 0.8f;           // Scattering coefficient (0-1)
-	int shadowSamples = 16;                   // Number of samples for self-shadowing
-	float shadowDensityScale = 5.0f;
-	float phaseG = 0.0f;                      // Phase function asymmetry (-1 to 1, 0 = isotropic)
-	bool enableVolumeShadows = true;          // Toggle volume self-shadowing
-	bool enableVolumeLighting = true;         // Toggle volume lighting
-
 };
 
 FluidParams fluidParams;
@@ -240,6 +230,62 @@ float getElapsedSeconds() {
 	auto now = std::chrono::steady_clock::now();
 	return std::chrono::duration<float>(now - simulationStartTime).count();
 }
+
+
+
+
+
+
+// ============================================================================
+// POINT LIGHT SHADOW MAPPING
+// ============================================================================
+
+const int SHADOW_MAP_SIZE = 1024;        // Resolution of each shadow cubemap face
+const int MAX_POINT_LIGHTS = 8;          // Maximum supported point lights
+
+struct PointLight {
+	glm::vec3 position;
+	float intensity;
+	float radius;         // Attenuation radius (far plane for shadow map)
+	bool castsShadows;
+
+	PointLight(glm::vec3 pos = glm::vec3(20, 20, 20),
+		float inten = 50.0f,
+		float rad = 100.0f,
+		bool shadows = true)
+		: position(pos), intensity(inten), radius(rad), castsShadows(shadows) {
+	}
+};
+
+// Point light list - add/remove lights here
+std::vector<PointLight> pointLights = {
+	PointLight(glm::vec3(20, 20, 20), 50.0f, 100.0f, true)  // Default light
+};
+
+// Shadow map resources (per light)
+struct ShadowMapResources {
+	GLuint depthCubemap = 0;
+	GLuint depthFBO = 0;
+};
+
+std::vector<ShadowMapResources> shadowMaps;
+GLuint shadowMapProgram = 0;
+
+// Shadow map matrices for cubemap faces (computed per light)
+glm::mat4 shadowProj;
+std::vector<std::vector<glm::mat4>> shadowTransforms;  // [lightIndex][faceIndex]
+
+
+
+
+
+
+// Shadow mapping functions
+void initShadowMaps();
+void renderShadowMaps();
+void cleanupShadowMaps();
+
+
 
 
 
@@ -338,150 +384,8 @@ GLuint volumeRenderProgram = 0;
 // Vertex structure for shader compatibility
 struct RenderVertex {
 	float position[3];
-	float normal[3];
 	float color[3];
 };
-
-// ============================================================================
-// LIGHTING STRUCTURES
-// ============================================================================
-
-const int MAX_POINT_LIGHTS = 8;
-const int MAX_SPOT_LIGHTS = 8;
-const int MAX_DIR_LIGHTS = 4;
-
-struct PointLight {
-	glm::vec3 position;
-	glm::vec3 color;
-	float intensity;
-	float constant;     // Attenuation: 1.0
-	float linear;       // Attenuation: 0.09
-	float quadratic;    // Attenuation: 0.032
-	bool enabled;
-
-	PointLight() : position(0.0f), color(1.0f), intensity(1.0f),
-		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
-	}
-};
-
-struct SpotLight {
-	glm::vec3 position;
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	float cutOff;       // Inner cone angle (cosine)
-	float outerCutOff;  // Outer cone angle (cosine)
-	float constant;
-	float linear;
-	float quadratic;
-	bool enabled;
-
-	SpotLight() : position(0.0f), direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), cutOff(glm::cos(glm::radians(12.5f))),
-		outerCutOff(glm::cos(glm::radians(17.5f))),
-		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
-	}
-};
-
-struct DirectionalLight {
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	bool enabled;
-
-	DirectionalLight() : direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), enabled(false) {
-	}
-};
-
-// Global light arrays
-std::vector<PointLight> pointLights(MAX_POINT_LIGHTS);
-std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
-std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
-
-// Material properties
-struct Material {
-	float ambient;
-	float shininess;
-	Material() : ambient(0.1f), shininess(32.0f) {}
-};
-
-Material globalMaterial;
-
-// Initialize default lights
-void initDefaultLights() {
-	// One directional light (sun-like)
-	//dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
-	//dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	//dirLights[0].intensity = 0.8f;
-	//dirLights[0].enabled = true;
-
-	// One point light
-	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	//pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	//pointLights[0].intensity = 50.0f;
-	//pointLights[0].enabled = true;
-
-	spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	spotLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
-	spotLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
-	spotLights[0].intensity = 50.0f;
-	spotLights[0].enabled = true;
-}
-
-
-// ============================================================================
-// SHADOW MAPPING STRUCTURES AND GLOBALS
-// ============================================================================
-
-// Shadow map resolution (higher = better quality, more memory)
-const int SHADOW_MAP_SIZE = 2048;
-const int POINT_SHADOW_MAP_SIZE = 1024;  // Cube maps are more expensive
-
-// Shadow map arrays for each light type
-GLuint dirLightShadowMaps[MAX_DIR_LIGHTS] = { 0 };
-GLuint dirLightShadowFBOs[MAX_DIR_LIGHTS] = { 0 };
-glm::mat4 dirLightSpaceMatrices[MAX_DIR_LIGHTS];
-
-GLuint spotLightShadowMaps[MAX_SPOT_LIGHTS] = { 0 };
-GLuint spotLightShadowFBOs[MAX_SPOT_LIGHTS] = { 0 };
-glm::mat4 spotLightSpaceMatrices[MAX_SPOT_LIGHTS];
-
-// Point lights use cube maps for omnidirectional shadows
-GLuint pointLightShadowCubeMaps[MAX_POINT_LIGHTS] = { 0 };
-GLuint pointLightShadowFBOs[MAX_POINT_LIGHTS] = { 0 };
-// 6 view matrices per point light (one for each cube face)
-glm::mat4 pointLightShadowMatrices[MAX_POINT_LIGHTS * 6];
-float pointLightFarPlanes[MAX_POINT_LIGHTS] = { 25.0f }; // Adjustable per light
-
-// Shadow rendering shader programs
-GLuint shadowDepthProgram = 0;           // For directional and spot lights
-GLuint pointShadowDepthProgram = 0;      // For point light cube maps
-
-// Shadow mapping parameters
-struct ShadowParams {
-	float bias = 0.0f;              // Depth bias to prevent shadow acne
-	float normalBias = 0.02f;         // Normal-based bias
-	int pcfSamples = 0;               // PCF kernel size (2 = 5x5 samples)
-	bool enableShadows = true;        // Global shadow toggle
-	float shadowIntensity = 0.5f;     // 0 = full shadow, 1 = no shadow effect
-};
-
-ShadowParams shadowParams;
-
-// Function declarations
-void initShadowMaps();
-void cleanupShadowMaps();
-void renderShadowMaps();
-void renderDirLightShadowMap(int lightIndex);
-void renderSpotLightShadowMap(int lightIndex);
-void renderPointLightShadowMap(int lightIndex);
-void setShadowUniforms(GLuint program);
-
-
-
-
-
 
 // GPU Buffer handles
 GLuint computeProgram = 0;
@@ -698,19 +602,6 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	// Combine triangles from all voxel objects
 	for (auto& v : objects) {
 		for (size_t i = 0; i < v.tri_vec.size(); i++) {
-			// Compute face normal from triangle vertices
-			glm::vec3 v0(v.tri_vec[i].vertex[0].x, v.tri_vec[i].vertex[0].y, v.tri_vec[i].vertex[0].z);
-			glm::vec3 v1(v.tri_vec[i].vertex[1].x, v.tri_vec[i].vertex[1].y, v.tri_vec[i].vertex[1].z);
-			glm::vec3 v2(v.tri_vec[i].vertex[2].x, v.tri_vec[i].vertex[2].y, v.tri_vec[i].vertex[2].z);
-
-			glm::vec3 edge1 = v1 - v0;
-			glm::vec3 edge2 = v2 - v0;
-			glm::vec3 faceNormal = glm::normalize(glm::cross(edge1, edge2));
-
-			// Transform normal by model matrix (use normal matrix for correct transformation)
-			glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(v.model_matrix)));
-			glm::vec3 worldNormal = glm::normalize(normalMatrix * faceNormal);
-
 			for (size_t j = 0; j < 3; j++) {
 				RenderVertex rv;
 
@@ -724,9 +615,6 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 				rv.position[0] = worldPos.x;
 				rv.position[1] = worldPos.y;
 				rv.position[2] = worldPos.z;
-				rv.normal[0] = worldNormal.x;
-				rv.normal[1] = worldNormal.y;
-				rv.normal[2] = worldNormal.z;
 				rv.color[0] = v.tri_vec[i].colour.x;
 				rv.color[1] = v.tri_vec[i].colour.y;
 				rv.color[2] = v.tri_vec[i].colour.z;
@@ -748,23 +636,13 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
 		indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
 
-	// Position attribute
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
 	glEnableVertexAttribArray(0);
-	// Normal attribute
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
 	glEnableVertexAttribArray(1);
-	// Color attribute
-	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(6 * sizeof(float)));
-	glEnableVertexAttribArray(2);
 
 	glBindVertexArray(0);
 }
-
-
-
-
-
 
 // Overload for single voxel object (backwards compatibility)
 void updateTriangleBuffer(voxel_object& v) {
@@ -1702,7 +1580,7 @@ GLuint mcNormalVBO = 0;
 const size_t MC_MAX_VERTICES = x_res * y_res * z_res * 5 * 3; // Max 5 triangles per cell
 
 // Toggle for marching cubes vs ray marching
-bool useMarchingCubes = false;
+bool useMarchingCubes = true;
 
 // ============================================================================
 // MARCHING CUBES - Function Declarations
