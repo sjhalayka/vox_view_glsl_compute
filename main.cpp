@@ -1608,7 +1608,7 @@ void main() {
     // Domain boundary conditions (closed box)
     vec3 vel = velocity[index].xyz;
     
-    // X boundaries
+    //// X boundaries
     //if (gid.x == 0) vel.x = max(vel.x, 0.0);
     //if (gid.x == gridRes.x - 1) vel.x = min(vel.x, 0.0);
     //
