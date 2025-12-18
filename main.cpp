@@ -1747,17 +1747,166 @@ void main()
 
 
 
-
-
-
-// ============================================================================
-// SHADOW MAP SHADERS (for point lights using cubemaps)
-// ============================================================================
-
-const char* shadowMapVertexSource = R"(
+const char* commonVertexShaderSource = R"(
 #version 430 core
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 color;
+layout(location = 2) in vec3 normal;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+out vec3 fragColor;
+out vec3 fragNormal;
+out vec3 fragWorldPos;
+
+void main() {
+    vec4 worldPos = model * vec4(position, 1.0);
+    fragWorldPos = worldPos.xyz;
+    fragColor = color;
+    fragNormal = mat3(transpose(inverse(model))) * normal;
+    gl_Position = projection * view * worldPos;
+}
+)";
+
+
+
+
+
+
+// Common fragment shader for all primitives with point light shadows
+const char* commonFragmentShaderSource = R"(
+#version 430 core
+
+in vec3 fragColor;
+in vec3 fragNormal;
+in vec3 fragWorldPos;
+
+out vec4 finalColor;
+
+// Maximum number of point lights (adjust as needed)
+#define MAX_POINT_LIGHTS 8
+
+// Point light data
+uniform int numPointLights;
+uniform vec3 lightPositions[MAX_POINT_LIGHTS];
+uniform float lightIntensities[MAX_POINT_LIGHTS];
+uniform vec3 lightColors[MAX_POINT_LIGHTS];
+uniform float lightFarPlanes[MAX_POINT_LIGHTS];
+
+// Shadow cubemaps
+uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
+
+// Camera position for specular
+uniform vec3 viewPos;
+
+// Ambient light
+uniform vec3 ambientColor;
+uniform float ambientStrength;
+
+// Shadow bias to prevent acne
+const float SHADOW_BIAS = 0.05;
+const float MAX_SHADOW_BIAS = 0.1;
+
+// Sample shadow cubemap with PCF (Percentage Closer Filtering)
+float calculateShadow(int lightIndex, vec3 fragToLight, float currentDepth, float farPlane) {
+    // Sample directions for PCF
+    vec3 sampleOffsetDirections[20] = vec3[](
+        vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1),
+        vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1),
+        vec3( 1,  1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1,  1,  0),
+        vec3( 1,  0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1,  0, -1),
+        vec3( 0,  1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0,  1, -1)
+    );
+    
+    float shadow = 0.0;
+    float samples = 20.0;
+    float diskRadius = 0.02;
+    
+    // Dynamic bias based on surface angle
+    vec3 normal = normalize(fragNormal);
+    vec3 lightDir = normalize(-fragToLight);
+    float bias = max(MAX_SHADOW_BIAS * (1.0 - dot(normal, lightDir)), SHADOW_BIAS);
+    
+    for (int i = 0; i < 20; ++i) {
+        float closestDepth;
+        
+        // Sample the appropriate shadow map based on light index
+        if (lightIndex == 0) closestDepth = texture(shadowMaps[0], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else if (lightIndex == 1) closestDepth = texture(shadowMaps[1], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else if (lightIndex == 2) closestDepth = texture(shadowMaps[2], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else if (lightIndex == 3) closestDepth = texture(shadowMaps[3], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else if (lightIndex == 4) closestDepth = texture(shadowMaps[4], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else if (lightIndex == 5) closestDepth = texture(shadowMaps[5], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else if (lightIndex == 6) closestDepth = texture(shadowMaps[6], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        else closestDepth = texture(shadowMaps[7], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        
+        closestDepth *= farPlane;
+        
+        if (currentDepth - bias > closestDepth) {
+            shadow += 1.0;
+        }
+    }
+    shadow /= samples;
+    
+    return shadow;
+}
+
+void main() {
+
+
+    vec3 normal = normalize(fragNormal);
+
+
+//finalColor = vec4(normal, 1.0);
+//return;
+
+
+    vec3 viewDir = normalize(viewPos - fragWorldPos);
+    
+    // Start with ambient light
+    vec3 result = ambientColor * ambientStrength * fragColor;
+    
+    // Process each point light
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; ++i) {
+        vec3 lightDir = lightPositions[i] - fragWorldPos;
+        float distance = length(lightDir);
+        lightDir = normalize(lightDir);
+        
+        // Attenuation (inverse square law with intensity)
+        float attenuation = lightIntensities[i] / (distance * distance);
+        
+        // Diffuse
+        float diff = max(dot(normal, lightDir), 0.0);
+        vec3 diffuse = diff * lightColors[i] * attenuation;
+        
+        // Specular (Blinn-Phong)
+        vec3 halfwayDir = normalize(lightDir + viewDir);
+        float spec = pow(max(dot(normal, halfwayDir), 0.0), 32.0);
+        vec3 specular = spec * lightColors[i] * attenuation * 0.5;
+        
+        // Shadow calculation
+        vec3 fragToLight = fragWorldPos - lightPositions[i];
+        float currentDepth = length(fragToLight);
+        float shadow = calculateShadow(i, fragToLight, currentDepth, lightFarPlanes[i]);
+        
+        // Apply shadow (1.0 = fully lit, 0.0 = fully shadowed)
+        result += (1.0 - shadow) * (diffuse + specular) * fragColor;
+    }
+    
+    finalColor = vec4(result, 1.0);
+}
+)";
+
+
+
+
+
+// Shadow map depth shader for point lights (renders to cubemap)
+const char* shadowMapVertexShader = R"(
+#version 430 core
+layout(location = 0) in vec3 position;
 
 uniform mat4 model;
 
@@ -1766,7 +1915,7 @@ void main() {
 }
 )";
 
-const char* shadowMapGeometrySource = R"(
+const char* shadowMapGeometryShader = R"(
 #version 430 core
 layout(triangles) in;
 layout(triangle_strip, max_vertices = 18) out;
@@ -1788,7 +1937,7 @@ void main() {
 }
 )";
 
-const char* shadowMapFragmentSource = R"(
+const char* shadowMapFragmentShader = R"(
 #version 430 core
 in vec4 FragPos;
 
@@ -1796,154 +1945,18 @@ uniform vec3 lightPos;
 uniform float farPlane;
 
 void main() {
+    // Get distance between fragment and light source
     float lightDistance = length(FragPos.xyz - lightPos);
-    // Normalize to [0,1] range
+    
+    // Map to [0, 1] range by dividing by far plane
     lightDistance = lightDistance / farPlane;
+    
+    // Write as depth
     gl_FragDepth = lightDistance;
 }
 )";
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Common vertex shader for all primitives (with shadow support)
-const char* commonVertexShaderSource = R"(
-#version 430 core
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 color;
-
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-
-out vec3 fragColor;
-out vec3 fragPos;
-out vec3 fragNormal;
-
-void main() {
-    vec4 worldPos = model * vec4(position, 1.0);
-    fragPos = worldPos.xyz;
-    fragColor = color;
-    
-    // Approximate normal from position (for simple lighting on voxel meshes)
-    fragNormal = normalize(position);
-    
-    gl_Position = projection * view * worldPos;
-}
-)";
-
-// Common fragment shader with point light shadows
-const char* commonFragmentShaderSource = R"(
-#version 430 core
-in vec3 fragColor;
-in vec3 fragPos;
-in vec3 fragNormal;
-
-out vec4 finalColor;
-
-#define MAX_POINT_LIGHTS 8
-
-uniform int numPointLights;
-uniform vec3 lightPositions[MAX_POINT_LIGHTS];
-uniform float lightIntensities[MAX_POINT_LIGHTS];
-uniform float lightRadii[MAX_POINT_LIGHTS];
-uniform bool lightCastsShadows[MAX_POINT_LIGHTS];
-uniform samplerCube shadowCubemaps[MAX_POINT_LIGHTS];
-
-uniform vec3 viewPos;
-uniform float ambientStrength = 0.15;
-
-// PCF shadow sampling for softer shadows
-float sampleShadowPCF(samplerCube shadowMap, vec3 fragToLight, float currentDepth, float farPlane) {
-    float shadow = 0.0;
-    float bias = 0.05;
-    float samples = 4.0;
-    float offset = 0.02;
-    
-    for (float x = -offset; x < offset; x += offset / (samples * 0.5)) {
-        for (float y = -offset; y < offset; y += offset / (samples * 0.5)) {
-            for (float z = -offset; z < offset; z += offset / (samples * 0.5)) {
-                float closestDepth = texture(shadowMap, fragToLight + vec3(x, y, z)).r;
-                closestDepth *= farPlane;
-                if (currentDepth - bias > closestDepth)
-                    shadow += 1.0;
-            }
-        }
-    }
-    shadow /= (samples * samples * samples);
-    return shadow;
-}
-
-void main() {
-    vec3 normal = normalize(fragNormal);
-    vec3 viewDir = normalize(viewPos - fragPos);
-    
-    // Ambient
-    vec3 ambient = ambientStrength * fragColor;
-    vec3 result = ambient;
-    
-    // Accumulate contribution from each point light
-    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
-        vec3 lightDir = lightPositions[i] - fragPos;
-        float distance = length(lightDir);
-        lightDir = normalize(lightDir);
-        
-        // Attenuation
-        float attenuation = lightIntensities[i] / (1.0 + 0.09 * distance + 0.032 * distance * distance);
-        
-        // Skip if beyond light radius
-        if (distance > lightRadii[i]) continue;
-        
-        // Shadow calculation
-        float shadow = 0.0;
-        if (lightCastsShadows[i]) {
-            vec3 fragToLight = fragPos - lightPositions[i];
-            float currentDepth = length(fragToLight);
-            shadow = sampleShadowPCF(shadowCubemaps[i], fragToLight, currentDepth, lightRadii[i]);
-        }
-        
-        // Diffuse
-        float diff = max(dot(normal, lightDir), 0.0);
-        vec3 diffuse = diff * fragColor * attenuation;
-        
-        // Specular (Blinn-Phong)
-        vec3 halfwayDir = normalize(lightDir + viewDir);
-        float spec = pow(max(dot(normal, halfwayDir), 0.0), 32.0);
-        vec3 specular = spec * vec3(0.3) * attenuation;
-        
-        // Apply shadow
-        result += (1.0 - shadow) * (diffuse + specular);
-    }
-    
-    finalColor = vec4(result, 1.0);
-}
-)";
-
-
-
-//
-//
-//// Common fragment shader for all primitives
-//const char* commonFragmentShaderSource = R"(
-//#version 430 core
-//in vec3 fragColor;
-//out vec4 finalColor;
-//void main() {
-//    finalColor = vec4(fragColor, 1.0);
-//}
-//)";
 
 
 
@@ -1985,6 +1998,183 @@ GLuint compileComputeShader(const char* source) {
     glDeleteShader(shader);
     return program;
 }
+
+
+
+
+
+
+// ============================================================================
+// Shadow Map Shader Compilation
+// ============================================================================
+
+GLuint createShadowMapProgram() {
+    GLuint vertShader = compileShader(GL_VERTEX_SHADER, shadowMapVertexShader);
+    GLuint geomShader = compileShader(GL_GEOMETRY_SHADER, shadowMapGeometryShader);
+    GLuint fragShader = compileShader(GL_FRAGMENT_SHADER, shadowMapFragmentShader);
+
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vertShader);
+    glAttachShader(program, geomShader);
+    glAttachShader(program, fragShader);
+    glLinkProgram(program);
+
+    GLint success;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(program, 512, nullptr, infoLog);
+        cerr << "Shadow map program linking failed:\n" << infoLog << endl;
+        return 0;
+    }
+
+    glDeleteShader(vertShader);
+    glDeleteShader(geomShader);
+    glDeleteShader(fragShader);
+
+    return program;
+}
+
+// ============================================================================
+// Point Light Management
+// ============================================================================
+
+void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color) {
+    PointLight light;
+    light.position = pos;
+    light.intensity = intensity;
+    light.color = color;
+    light.nearPlane = 0.1f;
+    light.farPlane = 100.0f;
+
+    // Create depth cubemap
+    glGenTextures(1, &light.depthCubemap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, light.depthCubemap);
+    for (int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_DEPTH_COMPONENT,
+            SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    // Create framebuffer
+    glGenFramebuffers(1, &light.shadowFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, light.shadowFBO);
+    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, light.depthCubemap, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        cerr << "Shadow map framebuffer not complete!" << endl;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    pointLights.push_back(light);
+    cout << "Added point light at (" << pos.x << ", " << pos.y << ", " << pos.z
+        << ") with intensity " << intensity << endl;
+}
+
+void initShadowMaps() {
+    cout << "Initializing shadow maps..." << endl;
+
+    // Compile shadow map shader program
+    shadowMapProgram = createShadowMapProgram();
+    if (!shadowMapProgram) {
+        cerr << "Failed to create shadow map program!" << endl;
+        return;
+    }
+
+    // Add default point light
+    addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+
+    cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
+}
+
+void renderShadowMaps() {
+    if (!shadowMapProgram || pointLights.empty()) return;
+
+    glUseProgram(shadowMapProgram);
+    glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+
+    // For each point light, render the scene to its shadow cubemap
+    for (size_t lightIdx = 0; lightIdx < pointLights.size(); ++lightIdx) {
+        PointLight& light = pointLights[lightIdx];
+
+        glBindFramebuffer(GL_FRAMEBUFFER, light.shadowFBO);
+        glClear(GL_DEPTH_BUFFER_BIT);
+
+        // Create shadow projection matrix (90 degree FOV for cubemap)
+        float aspect = 1.0f;
+        glm::mat4 shadowProj = glm::perspective(glm::radians(90.0f), aspect,
+            light.nearPlane, light.farPlane);
+
+        // Create view matrices for each cubemap face
+        glm::mat4 shadowTransforms[6];
+        shadowTransforms[0] = shadowProj * glm::lookAt(light.position,
+            light.position + glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+        shadowTransforms[1] = shadowProj * glm::lookAt(light.position,
+            light.position + glm::vec3(-1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+        shadowTransforms[2] = shadowProj * glm::lookAt(light.position,
+            light.position + glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        shadowTransforms[3] = shadowProj * glm::lookAt(light.position,
+            light.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+        shadowTransforms[4] = shadowProj * glm::lookAt(light.position,
+            light.position + glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+        shadowTransforms[5] = shadowProj * glm::lookAt(light.position,
+            light.position + glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+
+        // Set uniforms
+        for (int i = 0; i < 6; ++i) {
+            glUniformMatrix4fv(glGetUniformLocation(shadowMapProgram,
+                ("shadowMatrices[" + std::to_string(i) + "]").c_str()),
+                1, GL_FALSE, glm::value_ptr(shadowTransforms[i]));
+        }
+        glUniform3fv(glGetUniformLocation(shadowMapProgram, "lightPos"), 1, glm::value_ptr(light.position));
+        glUniform1f(glGetUniformLocation(shadowMapProgram, "farPlane"), light.farPlane);
+
+        // Render voxel objects (shadow casters) - NOT marching cubes
+        glm::mat4 identity(1.0f);
+        glUniformMatrix4fv(glGetUniformLocation(shadowMapProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
+
+        // Draw triangles (voxel mesh) - these cast shadows
+        if (numTriangleIndices > 0) {
+            glBindVertexArray(triangleVAO);
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
+            glBindVertexArray(0);
+        }
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Restore viewport
+    glViewport(0, 0, win_x, win_y);
+}
+
+void cleanupShadowMaps() {
+    if (shadowMapProgram) {
+        glDeleteProgram(shadowMapProgram);
+        shadowMapProgram = 0;
+    }
+
+    for (auto& light : pointLights) {
+        if (light.shadowFBO) glDeleteFramebuffers(1, &light.shadowFBO);
+        if (light.depthCubemap) glDeleteTextures(1, &light.depthCubemap);
+    }
+    pointLights.clear();
+}
+
+
+
+
+
+
+
+
+
 
 // ============================================================================
 // GPU Initialization
@@ -2102,204 +2292,6 @@ void initGPUBuffers(std::vector<voxel_object>& objects) {
     gpuInitialized = true;
     cout << "GPU buffers initialized successfully for " << objects.size() << " voxel objects" << endl;
 }
-
-
-
-
-
-
-
-// ============================================================================
-// SHADOW MAP INITIALIZATION
-// ============================================================================
-
-GLuint createShaderProgramWithGeometry(const char* vertSrc, const char* geomSrc, const char* fragSrc) {
-    GLuint vertShader = compileShader(GL_VERTEX_SHADER, vertSrc);
-    GLuint geomShader = compileShader(GL_GEOMETRY_SHADER, geomSrc);
-    GLuint fragShader = compileShader(GL_FRAGMENT_SHADER, fragSrc);
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, vertShader);
-    glAttachShader(program, geomShader);
-    glAttachShader(program, fragShader);
-    glLinkProgram(program);
-
-    GLint success;
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char infoLog[512];
-        glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        cerr << "Shadow shader program linking failed:\n" << infoLog << endl;
-    }
-
-    glDeleteShader(vertShader);
-    glDeleteShader(geomShader);
-    glDeleteShader(fragShader);
-
-    return program;
-}
-
-void initShadowMaps() {
-    cout << "Initializing shadow maps for " << pointLights.size() << " point lights..." << endl;
-
-    // Compile shadow map shader
-    shadowMapProgram = createShaderProgramWithGeometry(
-        shadowMapVertexSource,
-        shadowMapGeometrySource,
-        shadowMapFragmentSource
-    );
-
-    if (!shadowMapProgram) {
-        cerr << "Failed to compile shadow map shaders!" << endl;
-        return;
-    }
-
-    // Setup projection matrix for 90-degree FOV cubemap faces
-    float n = 0.1f;
-    shadowProj = glm::perspective(glm::radians(90.0f), 1.0f, n, 100.0f);
-
-    // Resize shadow map resources
-    shadowMaps.resize(pointLights.size());
-    shadowTransforms.resize(pointLights.size());
-
-    for (size_t i = 0; i < pointLights.size(); i++) {
-        ShadowMapResources& res = shadowMaps[i];
-
-        // Create depth cubemap texture
-        glGenTextures(1, &res.depthCubemap);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, res.depthCubemap);
-
-        for (unsigned int face = 0; face < 6; ++face) {
-            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT,
-                SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-        }
-
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-
-        // Create framebuffer
-        glGenFramebuffers(1, &res.depthFBO);
-        glBindFramebuffer(GL_FRAMEBUFFER, res.depthFBO);
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, res.depthCubemap, 0);
-        glDrawBuffer(GL_NONE);
-        glReadBuffer(GL_NONE);
-
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            cerr << "Shadow map framebuffer not complete for light " << i << "!" << endl;
-        }
-
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        // Pre-allocate transform matrices for 6 cubemap faces
-        shadowTransforms[i].resize(6);
-
-        cout << "  Light " << i << " shadow map created" << endl;
-    }
-
-    cout << "Shadow maps initialized successfully" << endl;
-}
-
-
-
-
-// ============================================================================
-// SHADOW MAP RENDERING
-// ============================================================================
-
-void updateShadowTransforms(int lightIndex) {
-    glm::vec3 lightPos = pointLights[lightIndex].position;
-    float farPlane = pointLights[lightIndex].radius;
-
-    // Recalculate projection with correct far plane
-    glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, farPlane);
-
-    // View matrices for each cubemap face
-    shadowTransforms[lightIndex][0] = proj * glm::lookAt(lightPos, lightPos + glm::vec3(1, 0, 0), glm::vec3(0, -1, 0));
-    shadowTransforms[lightIndex][1] = proj * glm::lookAt(lightPos, lightPos + glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0));
-    shadowTransforms[lightIndex][2] = proj * glm::lookAt(lightPos, lightPos + glm::vec3(0, 1, 0), glm::vec3(0, 0, 1));
-    shadowTransforms[lightIndex][3] = proj * glm::lookAt(lightPos, lightPos + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1));
-    shadowTransforms[lightIndex][4] = proj * glm::lookAt(lightPos, lightPos + glm::vec3(0, 0, 1), glm::vec3(0, -1, 0));
-    shadowTransforms[lightIndex][5] = proj * glm::lookAt(lightPos, lightPos + glm::vec3(0, 0, -1), glm::vec3(0, -1, 0));
-}
-
-void renderShadowMaps() {
-    if (!shadowMapProgram) return;
-
-    glUseProgram(shadowMapProgram);
-
-    // Save current viewport
-    GLint viewport[4];
-    glGetIntegerv(GL_VIEWPORT, viewport);
-
-    glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
-
-    for (size_t i = 0; i < pointLights.size(); i++) {
-        if (!pointLights[i].castsShadows) continue;
-
-        // Update shadow matrices for this light
-        updateShadowTransforms(i);
-
-        // Bind shadow framebuffer
-        glBindFramebuffer(GL_FRAMEBUFFER, shadowMaps[i].depthFBO);
-        glClear(GL_DEPTH_BUFFER_BIT);
-
-        // Set uniforms
-        glUniform3fv(glGetUniformLocation(shadowMapProgram, "lightPos"), 1,
-            glm::value_ptr(pointLights[i].position));
-        glUniform1f(glGetUniformLocation(shadowMapProgram, "farPlane"), pointLights[i].radius);
-
-        for (int face = 0; face < 6; face++) {
-            std::string uniformName = "shadowMatrices[" + std::to_string(face) + "]";
-            glUniformMatrix4fv(glGetUniformLocation(shadowMapProgram, uniformName.c_str()),
-                1, GL_FALSE, glm::value_ptr(shadowTransforms[i][face]));
-        }
-
-        // ================================================================
-        // RENDER SHADOW CASTERS HERE (NOT marching cubes isosurfaces!)
-        // ================================================================
-
-        // Render voxel triangles (these cast shadows)
-        if (numTriangleIndices > 0 && triangleVAO) {
-            glm::mat4 identity(1.0f);
-            glUniformMatrix4fv(glGetUniformLocation(shadowMapProgram, "model"),
-                1, GL_FALSE, glm::value_ptr(identity));
-
-            glBindVertexArray(triangleVAO);
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
-            glBindVertexArray(0);
-        }
-
-        // NOTE: Marching cubes meshes are NOT rendered here - they don't cast shadows
-    }
-
-    // Restore framebuffer and viewport
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-}
-
-
-
-
-
-// ============================================================================
-// SHADOW MAP CLEANUP
-// ============================================================================
-
-void cleanupShadowMaps() {
-    for (auto& res : shadowMaps) {
-        if (res.depthFBO) glDeleteFramebuffers(1, &res.depthFBO);
-        if (res.depthCubemap) glDeleteTextures(1, &res.depthCubemap);
-    }
-    shadowMaps.clear();
-    shadowTransforms.clear();
-
-    if (shadowMapProgram) glDeleteProgram(shadowMapProgram);
-}
-
-
 
 
 
@@ -3239,42 +3231,48 @@ void draw_triangles_fast(void) {
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
+
+    // Set camera position for specular
     glUniform3fv(glGetUniformLocation(renderProgram, "viewPos"), 1, &main_camera.eye.x);
 
-    // Set point light uniforms
-    int numLights = std::min((int)pointLights.size(), MAX_POINT_LIGHTS);
+    // Set ambient light
+    glUniform3f(glGetUniformLocation(renderProgram, "ambientColor"), 1.0f, 1.0f, 1.0f);
+    glUniform1f(glGetUniformLocation(renderProgram, "ambientStrength"), 0.5f);
+
+    // Set point light data
+    int numLights = std::min((int)pointLights.size(), 8);
     glUniform1i(glGetUniformLocation(renderProgram, "numPointLights"), numLights);
 
-    for (int i = 0; i < numLights; i++) {
+    for (int i = 0; i < numLights; ++i) {
         std::string prefix = "lightPositions[" + std::to_string(i) + "]";
-        glUniform3fv(glGetUniformLocation(renderProgram, prefix.c_str()), 1,
-            glm::value_ptr(pointLights[i].position));
+        glUniform3fv(glGetUniformLocation(renderProgram, prefix.c_str()), 1, glm::value_ptr(pointLights[i].position));
 
         prefix = "lightIntensities[" + std::to_string(i) + "]";
         glUniform1f(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].intensity);
 
-        prefix = "lightRadii[" + std::to_string(i) + "]";
-        glUniform1f(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].radius);
+        prefix = "lightColors[" + std::to_string(i) + "]";
+        glUniform3fv(glGetUniformLocation(renderProgram, prefix.c_str()), 1, glm::value_ptr(pointLights[i].color));
 
-        prefix = "lightCastsShadows[" + std::to_string(i) + "]";
-        glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()),
-            pointLights[i].castsShadows ? 1 : 0);
+        prefix = "lightFarPlanes[" + std::to_string(i) + "]";
+        glUniform1f(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].farPlane);
 
         // Bind shadow cubemap
-        if (pointLights[i].castsShadows && i < (int)shadowMaps.size()) {
-            glActiveTexture(GL_TEXTURE10 + i);
-            glBindTexture(GL_TEXTURE_CUBE_MAP, shadowMaps[i].depthCubemap);
-
-            prefix = "shadowCubemaps[" + std::to_string(i) + "]";
-            glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()), 10 + i);
-        }
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, pointLights[i].depthCubemap);
+        prefix = "shadowMaps[" + std::to_string(i) + "]";
+        glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()), i);
     }
 
     glBindVertexArray(triangleVAO);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
-}
 
+    // Unbind shadow maps
+    for (int i = 0; i < numLights; ++i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    }
+}
 
 
 
@@ -3471,21 +3469,17 @@ void reshape_func(int width, int height)
 
 void draw_objects(void)
 {
-    // ================================================================
-    // SHADOW PASS - Render scene from each light's perspective
-    // ================================================================
     renderShadowMaps();
 
-    // ================================================================
-    // MAIN RENDER PASS
-    // ================================================================
+    // Draw surface points (voxel boundaries)
+  //  draw_points_fast();
 
-    // Draw triangles (voxel mesh) - RECEIVES shadows
+    // Draw triangles (voxel mesh)
     if (draw_triangles_on_screen) {
         draw_triangles_fast();
     }
 
-    // Draw fluid - Marching cubes does NOT cast or receive shadows
+    // Draw fluid
     if (fluidSimEnabled) {
         draw_fluid_fast();
     }
@@ -3495,8 +3489,6 @@ void draw_objects(void)
         draw_axis_fast();
     }
 }
-
-
 
 float GLOBAL_TIME = 0;
 
@@ -4040,9 +4032,6 @@ int main(int argc, char** argv)
     // Initialize GPU buffers for all voxel objects
     initGPUBuffers(voxel_objects);
 
-    initShadowMaps();
-
-
     // Initial GPU computation for all objects
     std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
     get_background_points_GPU(voxel_objects);
@@ -4060,6 +4049,8 @@ int main(int argc, char** argv)
 
     // Initialize fluid simulation
     initFluidSimulation();
+
+    initShadowMaps();
 
     // Update obstacles from voxel collisions
     updateFluidObstacles();

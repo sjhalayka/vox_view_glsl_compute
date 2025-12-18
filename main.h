@@ -236,62 +236,6 @@ float getElapsedSeconds() {
 
 
 
-// ============================================================================
-// POINT LIGHT SHADOW MAPPING
-// ============================================================================
-
-const int SHADOW_MAP_SIZE = 1024;        // Resolution of each shadow cubemap face
-const int MAX_POINT_LIGHTS = 8;          // Maximum supported point lights
-
-struct PointLight {
-	glm::vec3 position;
-	float intensity;
-	float radius;         // Attenuation radius (far plane for shadow map)
-	bool castsShadows;
-
-	PointLight(glm::vec3 pos = glm::vec3(20, 20, 20),
-		float inten = 50.0f,
-		float rad = 100.0f,
-		bool shadows = true)
-		: position(pos), intensity(inten), radius(rad), castsShadows(shadows) {
-	}
-};
-
-// Point light list - add/remove lights here
-std::vector<PointLight> pointLights = {
-	PointLight(glm::vec3(20, 20, 20), 50.0f, 100.0f, true)  // Default light
-};
-
-// Shadow map resources (per light)
-struct ShadowMapResources {
-	GLuint depthCubemap = 0;
-	GLuint depthFBO = 0;
-};
-
-std::vector<ShadowMapResources> shadowMaps;
-GLuint shadowMapProgram = 0;
-
-// Shadow map matrices for cubemap faces (computed per light)
-glm::mat4 shadowProj;
-std::vector<std::vector<glm::mat4>> shadowTransforms;  // [lightIndex][faceIndex]
-
-
-
-
-
-
-// Shadow mapping functions
-void initShadowMaps();
-void renderShadowMaps();
-void cleanupShadowMaps();
-
-
-
-
-
-
-
-
 void updateFluidTextures()
 {
 	if (!fluidInitialized) return;
@@ -385,7 +329,51 @@ GLuint volumeRenderProgram = 0;
 struct RenderVertex {
 	float position[3];
 	float color[3];
+	float normal[3];  // NEW: Add normals for lighting
 };
+
+// ============================================================================
+// POINT LIGHT SHADOW MAPPING
+// ============================================================================
+
+// Point light structure
+struct PointLight {
+	glm::vec3 position;
+	float intensity;
+	glm::vec3 color;
+
+	// Shadow map data
+	GLuint depthCubemap;
+	GLuint shadowFBO;
+	float nearPlane;
+	float farPlane;
+
+	PointLight() : position(1.0f, 1.0f, 1.0f), intensity(1.0f), color(1.0f, 1.0f, 1.0f),
+		depthCubemap(0), shadowFBO(0), nearPlane(0.1f), farPlane(10000.0f) {
+	}
+};
+
+// Global point lights
+std::vector<PointLight> pointLights;
+
+// Shadow map settings
+const int SHADOW_MAP_SIZE = 1024;
+GLuint shadowMapProgram = 0;
+
+// Function declarations for shadow mapping
+void initShadowMaps();
+void renderShadowMaps();
+void cleanupShadowMaps();
+void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color = glm::vec3(1.0f));
+
+
+
+
+
+
+
+
+
 
 // GPU Buffer handles
 GLuint computeProgram = 0;
@@ -602,6 +590,13 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	// Combine triangles from all voxel objects
 	for (auto& v : objects) {
 		for (size_t i = 0; i < v.tri_vec.size(); i++) {
+			// Transform normal by model matrix (use inverse transpose for correct normal transformation)
+			glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(v.model_matrix)));
+			glm::vec3 worldNormal = glm::normalize(normalMatrix * glm::vec3(
+				v.tri_vec[i].normal.x,
+				v.tri_vec[i].normal.y,
+				v.tri_vec[i].normal.z));
+
 			for (size_t j = 0; j < 3; j++) {
 				RenderVertex rv;
 
@@ -618,6 +613,9 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 				rv.color[0] = v.tri_vec[i].colour.x;
 				rv.color[1] = v.tri_vec[i].colour.y;
 				rv.color[2] = v.tri_vec[i].colour.z;
+				rv.normal[0] = worldNormal.x;
+				rv.normal[1] = worldNormal.y;
+				rv.normal[2] = worldNormal.z;
 				vertices.push_back(rv);
 				indices.push_back(static_cast<GLuint>(vertices.size() - 1));
 			}
@@ -636,13 +634,20 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint),
 		indices.empty() ? nullptr : indices.data(), GL_STATIC_DRAW);
 
+	// Position attribute
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
 	glEnableVertexAttribArray(0);
+	// Color attribute
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
 	glEnableVertexAttribArray(1);
+	// Normal attribute (NEW)
+	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(6 * sizeof(float)));
+	glEnableVertexAttribArray(2);
 
 	glBindVertexArray(0);
 }
+
+
 
 // Overload for single voxel object (backwards compatibility)
 void updateTriangleBuffer(voxel_object& v) {
@@ -910,125 +915,121 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 
 				size_t neighbour_index = 0;
 
-				// Note that this index is possibly out of range, 
-				// which is why it's used second in the if()
+				// Top face (+Y normal) - Note: normals assigned BEFORE rotation
 				neighbour_index = x + (y + 1) * v.voxel_x_res + z * v.voxel_x_res * v.voxel_y_res;
 				if (y == v.voxel_y_res - 1 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q0.vertex[0];
 					t.vertex[1] = q0.vertex[1];
 					t.vertex[2] = q0.vertex[2];
-
+					t.normal = custom_math::vertex_3(0.0f, 1.0f, 0.0f);  // +Y
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q0.vertex[0];
 					t.vertex[1] = q0.vertex[2];
 					t.vertex[2] = q0.vertex[3];
+					t.normal = custom_math::vertex_3(0.0f, 1.0f, 0.0f);  // +Y
 					tri_vec.push_back(t);
 				}
 
-				// Note that this index is possibly out of range, 
-				// which is why it's used second in the if()
+				// Bottom face (-Y normal)
 				neighbour_index = x + (y - 1) * v.voxel_x_res + z * v.voxel_x_res * v.voxel_y_res;
 				if (y == 0 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q1.vertex[0];
 					t.vertex[1] = q1.vertex[1];
 					t.vertex[2] = q1.vertex[2];
+					t.normal = custom_math::vertex_3(0.0f, -1.0f, 0.0f);  // -Y
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q1.vertex[0];
 					t.vertex[1] = q1.vertex[2];
 					t.vertex[2] = q1.vertex[3];
+					t.normal = custom_math::vertex_3(0.0f, -1.0f, 0.0f);  // -Y
 					tri_vec.push_back(t);
 				}
 
-
-				// Note that this index is possibly out of range, 
-				// which is why it's used second in the if()
+				// Front face (+Z normal)
 				neighbour_index = x + y * v.voxel_x_res + (z + 1) * v.voxel_x_res * v.voxel_y_res;
 				if (z == v.voxel_z_res - 1 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q2.vertex[0];
 					t.vertex[1] = q2.vertex[1];
 					t.vertex[2] = q2.vertex[2];
+					t.normal = custom_math::vertex_3(0.0f, 0.0f, 1.0f);  // +Z
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q2.vertex[0];
 					t.vertex[1] = q2.vertex[2];
 					t.vertex[2] = q2.vertex[3];
+					t.normal = custom_math::vertex_3(0.0f, 0.0f, 1.0f);  // +Z
 					tri_vec.push_back(t);
 				}
 
-
-				// Note that this index is possibly out of range, 
-				// which is why it's used second in the if()
+				// Back face (-Z normal)
 				neighbour_index = x + (y)*v.voxel_x_res + (z - 1) * v.voxel_x_res * v.voxel_y_res;
 				if (z == 0 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q3.vertex[0];
 					t.vertex[1] = q3.vertex[1];
 					t.vertex[2] = q3.vertex[2];
+					t.normal = custom_math::vertex_3(0.0f, 0.0f, -1.0f);  // -Z
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q3.vertex[0];
 					t.vertex[1] = q3.vertex[2];
 					t.vertex[2] = q3.vertex[3];
+					t.normal = custom_math::vertex_3(0.0f, 0.0f, -1.0f);  // -Z
 					tri_vec.push_back(t);
 				}
 
-
-				// Note that this index is possibly out of range, 
-				// which is why it's used second in the if()
+				// Right face (+X normal)
 				neighbour_index = (x + 1) + (y)*v.voxel_x_res + (z)*v.voxel_x_res * v.voxel_y_res;
 				if (x == v.voxel_x_res - 1 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q4.vertex[0];
 					t.vertex[1] = q4.vertex[1];
 					t.vertex[2] = q4.vertex[2];
+					t.normal = custom_math::vertex_3(1.0f, 0.0f, 0.0f);  // +X
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q4.vertex[0];
 					t.vertex[1] = q4.vertex[2];
 					t.vertex[2] = q4.vertex[3];
+					t.normal = custom_math::vertex_3(1.0f, 0.0f, 0.0f);  // +X
 					tri_vec.push_back(t);
 				}
 
-				// Note that this index is possibly out of range, 
-				// which is why it's used second in the if()
+				// Left face (-X normal)
 				neighbour_index = (x - 1) + (y)*v.voxel_x_res + (z)*v.voxel_x_res * v.voxel_y_res;
 				if (x == 0 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q5.vertex[0];
 					t.vertex[1] = q5.vertex[1];
 					t.vertex[2] = q5.vertex[2];
+					t.normal = custom_math::vertex_3(-1.0f, 0.0f, 0.0f);  // -X
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q5.vertex[0];
 					t.vertex[1] = q5.vertex[2];
 					t.vertex[2] = q5.vertex[3];
+					t.normal = custom_math::vertex_3(-1.0f, 0.0f, 0.0f);  // -X
 					tri_vec.push_back(t);
 				}
 			}
 		}
 	}
 
-
-
 	cout << tri_vec.size() << endl;
 
-
-
-
-
-
-
+	// Rotate vertices and normals
 	for (size_t i = 0; i < tri_vec.size(); i++)
 	{
 		static const float pi = 4.0f * atanf(1.0f);
 		tri_vec[i].vertex[0].rotate_x(pi - pi / 2.0f);
 		tri_vec[i].vertex[1].rotate_x(pi - pi / 2.0f);
 		tri_vec[i].vertex[2].rotate_x(pi - pi / 2.0f);
+		tri_vec[i].normal.rotate_x(pi - pi / 2.0f);  // Rotate normal too!
 	}
 
 	for (size_t i = 0; i < v.voxel_centres.size(); i++)
@@ -1037,9 +1038,10 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 		v.voxel_centres[i].rotate_x(pi - pi / 2.0f);
 	}
 
-
 	return true;
 }
+
+
 
 
 

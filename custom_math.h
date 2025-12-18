@@ -175,6 +175,7 @@ namespace custom_math
 	public:
 		vertex_3 vertex[3];
 		vertex_3 colour;
+		vertex_3 normal;
 	};
 
 
