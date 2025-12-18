@@ -1609,16 +1609,16 @@ void main() {
     vec3 vel = velocity[index].xyz;
     
     // X boundaries
-    if (gid.x == 0) vel.x = max(vel.x, 0.0);
-    if (gid.x == gridRes.x - 1) vel.x = min(vel.x, 0.0);
-    
-    // Y boundaries
-    if (gid.y == 0) vel.y = max(vel.y, 0.0);
-    if (gid.y == gridRes.y - 1) vel.y = min(vel.y, 0.0);
-    
-    // Z boundaries
-    if (gid.z == 0) vel.z = max(vel.z, 0.0);
-    if (gid.z == gridRes.z - 1) vel.z = min(vel.z, 0.0);
+    //if (gid.x == 0) vel.x = max(vel.x, 0.0);
+    //if (gid.x == gridRes.x - 1) vel.x = min(vel.x, 0.0);
+    //
+    //// Y boundaries
+    //if (gid.y == 0) vel.y = max(vel.y, 0.0);
+    //if (gid.y == gridRes.y - 1) vel.y = min(vel.y, 0.0);
+    //
+    //// Z boundaries
+    //if (gid.z == 0) vel.z = max(vel.z, 0.0);
+    //if (gid.z == gridRes.z - 1) vel.z = min(vel.z, 0.0);
     
     velocity[index] = vec4(vel, 0.0);
 }
