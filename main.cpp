@@ -1639,6 +1639,8 @@ void main()
 }
 )";
 
+
+
 const char* volumeFragSource = R"(
 #version 430 core
 out vec4 FragColor;
@@ -1650,25 +1652,149 @@ uniform sampler3D obstacleTex;
 
 uniform mat4 invViewProj;
 uniform vec3 cameraPos;
-uniform vec3 gridMin = vec3(-10.0, -10.0, -10.0);
-uniform vec3 gridMax = vec3(10.0, 10.0, 10.0);
-uniform ivec3 gridRes = ivec3(128, 128, 128);
+uniform vec3 gridMin;
+uniform vec3 gridMax;
+uniform ivec3 gridRes;
 
-uniform bool visualizeTemperature = false;
-uniform float densityFactor = 1.0;
-uniform float temperatureThreshold = 1.0;
-uniform float stepSize = 0.2;
-uniform int maxSteps = 128;
+uniform bool visualizeTemperature;
+uniform float densityFactor;
+uniform float temperatureThreshold;
+uniform float stepSize;
+uniform int maxSteps;
 
-vec3 heatColor(float t)
-{
-    // Black -> Red -> Yellow -> White
-    return 5.0*mix(mix(vec3(0.0), vec3(1.0,0.0,0.0), t),
-               mix(vec3(1.0,1.0,0.0), vec3(1.0,1.0,1.0), t*t), smoothstep(0.5, 1.0, t));
+// ============================================================================
+// POINT LIGHT UNIFORMS
+// ============================================================================
+#define MAX_POINT_LIGHTS 8
+
+uniform int numPointLights;
+uniform vec3 lightPositions[MAX_POINT_LIGHTS];
+uniform float lightIntensities[MAX_POINT_LIGHTS];
+uniform vec3 lightColors[MAX_POINT_LIGHTS];
+uniform float lightFarPlanes[MAX_POINT_LIGHTS];
+uniform int lightEnabled[MAX_POINT_LIGHTS];
+
+uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
+
+// ============================================================================
+// SHADOW SAMPLING FOR VOLUMES
+// ============================================================================
+
+// Sample shadow for a point in the volume
+// Returns 0.0 = fully shadowed, 1.0 = fully lit
+float sampleVolumeShadow(int lightIndex, vec3 worldPos) {
+    vec3 fragToLight = worldPos - lightPositions[lightIndex];
+    float currentDepth = length(fragToLight);
+    float farPlane = lightFarPlanes[lightIndex];
+    
+    // Normalize for cubemap lookup
+    vec3 dir = normalize(fragToLight);
+    
+    float closestDepth;
+    if (lightIndex == 0) closestDepth = texture(shadowMaps[0], fragToLight).r;
+    else if (lightIndex == 1) closestDepth = texture(shadowMaps[1], fragToLight).r;
+    else if (lightIndex == 2) closestDepth = texture(shadowMaps[2], fragToLight).r;
+    else if (lightIndex == 3) closestDepth = texture(shadowMaps[3], fragToLight).r;
+    else if (lightIndex == 4) closestDepth = texture(shadowMaps[4], fragToLight).r;
+    else if (lightIndex == 5) closestDepth = texture(shadowMaps[5], fragToLight).r;
+    else if (lightIndex == 6) closestDepth = texture(shadowMaps[6], fragToLight).r;
+    else closestDepth = texture(shadowMaps[7], fragToLight).r;
+    
+    closestDepth *= farPlane;
+    
+    // Soft bias for volumes (larger than surface bias)
+    float bias = 0.5;
+    
+    return (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
 }
 
-void main()
-{
+// March from sample point toward light to estimate in-scattering shadow
+// This creates volumetric self-shadowing within the smoke
+float marchLightShadow(vec3 samplePos, int lightIndex, int shadowSteps) {
+    vec3 lightDir = normalize(lightPositions[lightIndex] - samplePos);
+    float lightDist = length(lightPositions[lightIndex] - samplePos);
+    float shadowStepSize = min(lightDist, 5.0) / float(shadowSteps);
+    
+    float shadowDensity = 0.0;
+    vec3 pos = samplePos;
+    
+    for (int i = 0; i < shadowSteps; i++) {
+        pos += lightDir * shadowStepSize;
+        
+        // Check if still in volume bounds
+        vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+            break;
+        }
+        
+        // Check for obstacle
+        if (texture(obstacleTex, uvw).r > 0.5) {
+            return 0.0; // Blocked by solid
+        }
+        
+        // Accumulate density along light ray
+        shadowDensity += texture(densityTex, uvw).r * shadowStepSize;
+    }
+    
+    // Exponential falloff based on accumulated density
+    return exp(-shadowDensity * 0.5);
+}
+
+// ============================================================================
+// LIGHTING CALCULATION FOR VOLUME SAMPLE
+// ============================================================================
+
+vec3 calculateVolumeLighting(vec3 worldPos, float density) {
+    vec3 totalLight = vec3(0.0);
+    
+    // Ambient contribution
+    vec3 ambient = vec3(0.15);
+    totalLight += ambient;
+    
+    // Process each point light
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
+        if (lightEnabled[i] == 0) continue;
+        
+        vec3 toLight = lightPositions[i] - worldPos;
+        float dist = length(toLight);
+        
+        // Attenuation (inverse square with intensity)
+        float attenuation = lightIntensities[i] / (dist * dist + 1.0);
+        
+        // Shadow from solid geometry (shadow maps)
+        float solidShadow = sampleVolumeShadow(i, worldPos);
+        
+        // Volumetric self-shadowing (light marching through smoke)
+        // Use fewer steps for performance (4-8 is usually enough)
+        float volumeShadow = marchLightShadow(worldPos, i, 6);
+        
+        // Combined shadow factor
+        float shadow = solidShadow * volumeShadow;
+        
+        // Add light contribution
+        totalLight += lightColors[i] * attenuation * shadow;
+    }
+    
+    return totalLight;
+}
+
+// ============================================================================
+// HEAT COLOR (unchanged from original)
+// ============================================================================
+
+vec3 heatColor(float t) {
+    return 5.0 * mix(
+        mix(vec3(0.0), vec3(1.0, 0.0, 0.0), t),
+        mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), t * t),
+        smoothstep(0.5, 1.0, t)
+    );
+}
+
+// ============================================================================
+// MAIN RAY MARCHING LOOP
+// ============================================================================
+
+void main() {
     // Ray origin and direction in world space
     vec4 near = vec4(vTexCoord * 2.0 - 1.0, -1.0, 1.0);
     vec4 far  = vec4(vTexCoord * 2.0 - 1.0,  1.0, 1.0);
@@ -1700,15 +1826,12 @@ void main()
     vec4 color = vec4(0.0);
     float transmittance = 1.0;
 
-    for (int i = 0; i < maxSteps && t < texit; ++i)
-    {
+    for (int i = 0; i < maxSteps && t < texit; ++i) {
         vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
 
+        // Check for obstacle
         float obs = texture(obstacleTex, uvw).r;
         if (obs > 0.5) {
-            // Hit solid voxel obstacle - stop marching entirely
-            // Optional: tint with voxel color if you want solids visible through thin fluid
-            // But for pure occlusion, just break
             break;
         }
 
@@ -1718,30 +1841,48 @@ void main()
         float sampleValue = visualizeTemperature ?
             max(temp - temperatureThreshold, 0.0) : density;
 
-        if (sampleValue > 0.01)
-        {
+        if (sampleValue > 0.01) {
+            // Calculate lighting at this sample point
+            vec3 lighting = calculateVolumeLighting(pos, sampleValue);
+            
+            // Absorption coefficient
             float absorption = densityFactor * sampleValue * stepSize;
-            vec3 emitColor = visualizeTemperature ?
-                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);  // smoke color
+            
+            // Base smoke color (can be tinted by temperature)
+            vec3 baseColor = visualizeTemperature ?
+                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);
+            
+            // Apply lighting to smoke color
+            vec3 litColor = baseColor * lighting;
 
+            // Beer-Lambert absorption
             vec3 absorbed = exp(-absorption * vec3(1.0));
-            vec3 contrib = (1.0 - absorbed) * emitColor;
+            vec3 contrib = (1.0 - absorbed) * litColor;
 
+            // Accumulate with front-to-back compositing
             color.rgb += transmittance * contrib;
             color.a += (1.0 - absorbed.x) * transmittance;
             transmittance *= absorbed.x;
 
-            if (transmittance < 0.01) break;  // early termination for opacity
+            // Early termination when nearly opaque
+            if (transmittance < 0.01) break;
         }
 
         t += stepSize;
         pos = rayOrigin + rayDir * t;
     }
 
-    color.rgb += transmittance * vec3(0.1, 0.15, 0.2); // Ambient background
+    // Background color blended with remaining transmittance
+    vec3 backgroundColor = vec3(0.1, 0.15, 0.2);
+    color.rgb += transmittance * backgroundColor;
+    
     FragColor = color;
 }
 )";
+
+
+
+
 
 
 
@@ -2992,55 +3133,119 @@ void updateFluidVisualization() {
 void draw_fluid_fast() {
     if (!fluidInitialized) return;
 
-    // Update textures from SSBOs (still needed for the density data)
+    // Update textures from SSBOs
     updateFluidTextures();
 
     if (useMarchingCubes) {
         // Run marching cubes on current density field
         runAllMarchingCubesLayers();
-
-        // Draw the generated meshes
         drawMarchingCubesMesh();
     }
     else {
-        // Original ray marching code (keep as fallback)
-        // ... your existing ray marching code here ...
+        // Ray marching with lighting
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         glUseProgram(volumeRenderProgram);
 
+        // Bind density texture
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_3D, densityTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "densityTex"), 0);
 
+        // Bind temperature texture
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_3D, temperatureTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "temperatureTex"), 1);
 
+        // Bind obstacle texture
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_3D, obstacleTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "obstacleTex"), 2);
 
+        // ====================================================================
+        // BIND SHADOW CUBEMAPS (starting at texture unit 3)
+        // ====================================================================
+        int numLights = std::min((int)pointLights.size(), 8);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "numPointLights"), numLights);
+
+        for (int i = 0; i < numLights; ++i) {
+            // Bind shadow cubemap
+            glActiveTexture(GL_TEXTURE3 + i);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, pointLights[i].depthCubemap);
+            std::string uniformName = "shadowMaps[" + std::to_string(i) + "]";
+            glUniform1i(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()), 3 + i);
+
+            // Pass light position
+            uniformName = "lightPositions[" + std::to_string(i) + "]";
+            glUniform3fv(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
+                1, glm::value_ptr(pointLights[i].position));
+
+            // Pass light intensity
+            uniformName = "lightIntensities[" + std::to_string(i) + "]";
+            glUniform1f(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
+                pointLights[i].intensity);
+
+            // Pass light color
+            uniformName = "lightColors[" + std::to_string(i) + "]";
+            glUniform3fv(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
+                1, glm::value_ptr(pointLights[i].color));
+
+            // Pass far plane
+            uniformName = "lightFarPlanes[" + std::to_string(i) + "]";
+            glUniform1f(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
+                pointLights[i].farPlane);
+
+            // Pass enabled state
+            uniformName = "lightEnabled[" + std::to_string(i) + "]";
+            glUniform1i(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
+                pointLights[i].enabled ? 1 : 0);
+        }
+
+        // ====================================================================
+        // EXISTING UNIFORMS
+        // ====================================================================
         glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
         glm::mat4 invViewProj = glm::inverse(viewProj);
 
-        glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"), 1, GL_FALSE, &invViewProj[0][0]);
-        glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"), 1, &main_camera.eye.x);
-        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
-        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
-        glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"), x_res, y_res, z_res);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"), fluidParams.visualizeTemperature ? 1 : 0);
+        glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"),
+            1, GL_FALSE, &invViewProj[0][0]);
+        glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"),
+            1, &main_camera.eye.x);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"),
+            -x_grid_max, -y_grid_max, -z_grid_max);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"),
+            x_grid_max, y_grid_max, z_grid_max);
+        glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"),
+            x_res, y_res, z_res);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"),
+            fluidParams.visualizeTemperature ? 1 : 0);
 
+        // Volume rendering parameters
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "densityFactor"), 1.0f);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "temperatureThreshold"), 1.0f);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "stepSize"), 0.2f);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "maxSteps"), 128);
+
+        // Draw fullscreen quad
         glBindVertexArray(fullscreenVAO);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
+
+        // ====================================================================
+        // UNBIND SHADOW MAPS
+        // ====================================================================
+        for (int i = 0; i < numLights; ++i) {
+            glActiveTexture(GL_TEXTURE3 + i);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+        }
 
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
     }
 }
+
 
 
 
@@ -3542,7 +3747,7 @@ void idle_func(void) {
             else
             {
                 pointLights[1].position = currentMouseWorldPos;
-                pointLights[1].enabled = true;
+                pointLights[1].enabled = false;
             }
         }
         else
