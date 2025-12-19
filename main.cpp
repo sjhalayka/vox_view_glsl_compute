@@ -3827,7 +3827,7 @@ void idle_func(void) {
             // Use a fixed secondary light slot instead of creating new lights
             if (pointLights.size() >= 2) {
                 // Reuse existing light at index 1
-                pointLights[1].position = currentMouseWorldPos;
+                pointLights[1].position = currentMouseWorldPos + glm::vec3(0, 0, 0);
                 pointLights[1].enabled = true;
             }
             // Note: Don't create new lights during runtime - manage them at init

@@ -165,7 +165,7 @@ struct FluidParams {
 	float volumeAbsorption = 1.0f;           // How much light is absorbed per unit density
 	float volumeScattering = 0.8f;           // Scattering coefficient (0-1)
 	int shadowSamples = 16;                  // Number of samples for self-shadowing
-	float shadowDensityScale = 5.0f;         // Density multiplier for shadow rays
+	float shadowDensityScale = 0.1f;         // Density multiplier for shadow rays
 	float phaseG = 0.0f;                     // Phase function asymmetry (-1 to 1, 0 = isotropic)
 	// Positive = forward scattering (bright when looking toward light)
 	// Negative = backward scattering (bright when looking away from light)
