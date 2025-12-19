@@ -182,28 +182,10 @@ bool fluidInitialized = false;
 // Note: PointLight is already defined later with shadow mapping support
 // ============================================================================
 
-const int MAX_SPOT_LIGHTS = 8;
 const int MAX_DIR_LIGHTS = 4;
 const int MAX_POINT_LIGHTS = 4;
 
-struct SpotLight {
-	glm::vec3 position;
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	float cutOff;       // Inner cone angle (cosine)
-	float outerCutOff;  // Outer cone angle (cosine)
-	float constant;
-	float linear;
-	float quadratic;
-	bool enabled;
 
-	SpotLight() : position(0.0f), direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), cutOff(glm::cos(glm::radians(12.5f))),
-		outerCutOff(glm::cos(glm::radians(17.5f))),
-		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
-	}
-};
 
 struct DirectionalLight {
 	glm::vec3 direction;
@@ -216,8 +198,6 @@ struct DirectionalLight {
 	}
 };
 
-// Global additional light arrays
-std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
 std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
 
 
@@ -256,22 +236,15 @@ Material globalMaterial;
 // Initialize default lights (call after initShadowMaps adds the point light)
 void initDefaultLights() {
 	// One directional light (sun-like)
-	dirLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
-	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	dirLights[0].intensity = 0.8f;
-	dirLights[0].enabled = true;
+	//dirLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
+	//dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	//dirLights[0].intensity = 0.8f;
+	//dirLights[0].enabled = true;
 
-	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	//pointLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	//pointLights[0].intensity = 5000.0f;
-	//pointLights[0].enabled = true;
-
-	//spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	//spotLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
-	//spotLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	//spotLights[0].intensity = 5000.0f;
-	//spotLights[0].enabled = true;
-
+	pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	pointLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	pointLights[0].intensity = 1.0;
+	pointLights[0].enabled = true;
 
 }
 

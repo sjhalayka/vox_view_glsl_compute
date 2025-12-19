@@ -2331,7 +2331,7 @@ void initShadowMaps() {
     }
 
     // Add default point light
-    addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+    addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0, glm::vec3(1.0f, 1.0f, 1.0f));
 
     cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
 }
@@ -3247,28 +3247,8 @@ void setVolumeLightUniforms(GLuint program) {
         if (dirLights[i].enabled) numDir++;
     }
 
-    // NOTE: Point lights are set separately using lightPositions[], lightIntensities[], etc.
-    // Do NOT set them here with struct-style names - it would conflict with the correct uniforms
-
-    // Set spot lights
-    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
-        std::string base = "spotLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(spotLights[i].position));
-        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(spotLights[i].direction));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(spotLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), spotLights[i].intensity);
-        glUniform1f(glGetUniformLocation(program, (base + "cutOff").c_str()), spotLights[i].cutOff);
-        glUniform1f(glGetUniformLocation(program, (base + "outerCutOff").c_str()), spotLights[i].outerCutOff);
-        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), spotLights[i].constant);
-        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), spotLights[i].linear);
-        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), spotLights[i].quadratic);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), spotLights[i].enabled ? 1 : 0);
-        if (spotLights[i].enabled) numSpot++;
-    }
-
     // Set light counts (but NOT numPointLights - that's handled elsewhere)
     glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
-    glUniform1i(glGetUniformLocation(program, "numSpotLights"), numSpot);
 }
 
 
