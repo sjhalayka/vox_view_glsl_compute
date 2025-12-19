@@ -182,7 +182,7 @@ bool fluidInitialized = false;
 // Note: PointLight is already defined later with shadow mapping support
 // ============================================================================
 
-const int MAX_POINT_LIGHTS = 4;
+const int MAX_POINT_LIGHTS = 8;
 
 // Shadow map settings
 const int SHADOW_MAP_SIZE = 1024;
@@ -215,8 +215,10 @@ struct PointLight {
 };
 
 // Global point lights
-std::vector<PointLight> pointLights(MAX_POINT_LIGHTS);
+std::vector<PointLight> pointLights;
 
+
+// https://claude.ai/chat/9079d464-559b-4b70-9b29-04100f968c61
 
 
 // Material properties
@@ -230,9 +232,12 @@ Material globalMaterial;
 
 // Initialize default lights (call after initShadowMaps adds the point light)
 void initDefaultLights() {
-
+	// Main scene light
 	addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0, glm::vec3(1.0f, 1.0f, 1.0f));
 
+	// Secondary light for injection point (starts disabled)
+	addPointLight(glm::vec3(0.0f, 0.0f, 0.0f), 500.0, glm::vec3(1.0f, 0.0f, 0.0f));
+	pointLights.back().enabled = false;  // Disabled until user injects
 }
 
 // Fluid SSBOs

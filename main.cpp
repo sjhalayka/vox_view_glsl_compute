@@ -2205,6 +2205,13 @@ GLuint createShadowMapProgram() {
 // ============================================================================
 
 void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color) {
+
+    if (pointLights.size() >= MAX_POINT_LIGHTS) {
+        cerr << "Warning: Maximum point lights (" << MAX_POINT_LIGHTS
+            << ") reached, cannot add more." << endl;
+        return;
+    }
+
     PointLight light;
     light.position = pos;
     light.intensity = intensity;
@@ -3494,8 +3501,12 @@ void draw_triangles_fast(void) {
     glUniform1f(glGetUniformLocation(renderProgram, "ambientStrength"), 0.5f);
 
     // Set point light data
-    int numLights = std::min((int)pointLights.size(), 8);
+// Set point light data - only for ACTUAL lights, not MAX
+    int numLights = static_cast<int>(pointLights.size());  // Use actual size
+    numLights = std::min(numLights, MAX_POINT_LIGHTS);     // Cap at shader limit
     glUniform1i(glGetUniformLocation(renderProgram, "numPointLights"), numLights);
+
+
 
     for (int i = 0; i < numLights; ++i) {
         std::string prefix = "lightPositions[" + std::to_string(i) + "]";
@@ -3726,8 +3737,27 @@ void reshape_func(int width, int height)
     if (textRenderer)
         textRenderer->setProjection(win_x, win_y);
 
+    // Save light positions/settings before cleanup
+    std::vector<glm::vec3> savedPositions;
+    std::vector<float> savedIntensities;
+    std::vector<glm::vec3> savedColors;
+    std::vector<bool> savedEnabled;
+
+    for (const auto& light : pointLights) {
+        savedPositions.push_back(light.position);
+        savedIntensities.push_back(light.intensity);
+        savedColors.push_back(light.color);
+        savedEnabled.push_back(light.enabled);
+    }
+
     cleanupShadowMaps();
     initShadowMaps();
+
+    // Restore additional lights if there were more than 1
+    for (size_t i = 1; i < savedPositions.size() && i < MAX_POINT_LIGHTS; i++) {
+        addPointLight(savedPositions[i], savedIntensities[i], savedColors[i]);
+        pointLights.back().enabled = savedEnabled[i];
+    }
 
 }
 
@@ -3794,18 +3824,20 @@ void idle_func(void) {
             addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
             lastMouseWorldPos = currentMouseWorldPos;
 
-            if (enabled_count < 2)
-                addPointLight(currentMouseWorldPos, 500.0, glm::vec3(1.0, 0.0, 0.0));
-            else
-            {
+            // Use a fixed secondary light slot instead of creating new lights
+            if (pointLights.size() >= 2) {
+                // Reuse existing light at index 1
                 pointLights[1].position = currentMouseWorldPos;
                 pointLights[1].enabled = true;
             }
+            // Note: Don't create new lights during runtime - manage them at init
         }
         else
         {
-            if (enabled_count == 2)
+            // Disable the injection light when not injecting
+            if (pointLights.size() >= 2) {
                 pointLights[1].enabled = false;
+            }
         }
 
 
