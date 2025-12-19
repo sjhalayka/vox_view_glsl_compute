@@ -182,7 +182,6 @@ bool fluidInitialized = false;
 // Note: PointLight is already defined later with shadow mapping support
 // ============================================================================
 
-const int MAX_DIR_LIGHTS = 4;
 const int MAX_POINT_LIGHTS = 4;
 
 // Shadow map settings
@@ -195,20 +194,6 @@ void renderShadowMaps();
 void cleanupShadowMaps();
 void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color = glm::vec3(1.0f));
 
-
-
-struct DirectionalLight {
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	bool enabled;
-
-	DirectionalLight() : direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), enabled(false) {
-	}
-};
-
-std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
 
 
 // Point light structure
@@ -245,17 +230,7 @@ Material globalMaterial;
 
 // Initialize default lights (call after initShadowMaps adds the point light)
 void initDefaultLights() {
-	// One directional light (sun-like)
-	//dirLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
-	//dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	//dirLights[0].intensity = 0.8f;
-	//dirLights[0].enabled = true;
 
-	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	//pointLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	//pointLights[0].intensity = 1.0;
-	//pointLights[0].enabled = true;
-		// Add default point light
 	addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0, glm::vec3(1.0f, 1.0f, 1.0f));
 
 }

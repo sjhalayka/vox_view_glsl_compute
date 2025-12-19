@@ -1675,37 +1675,6 @@ uniform int lightEnabled[MAX_POINT_LIGHTS];
 
 uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
 
-// ============================================================================
-// ADDITIONAL LIGHT STRUCTURES (for phase function)
-// ============================================================================
-#define MAX_SPOT_LIGHTS 8
-#define MAX_DIR_LIGHTS 4
-
-struct SpotLight {
-    vec3 position;
-    vec3 direction;
-    vec3 color;
-    float intensity;
-    float cutOff;
-    float outerCutOff;
-    float constant;
-    float linear;
-    float quadratic;
-    bool enabled;
-};
-
-struct DirLight {
-    vec3 direction;
-    vec3 color;
-    float intensity;
-    bool enabled;
-};
-
-uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
-uniform DirLight dirLights[MAX_DIR_LIGHTS];
-
-uniform int numSpotLights;
-uniform int numDirLights;
 
 // ============================================================================
 // VOLUME LIGHTING PARAMETERS
@@ -1868,24 +1837,6 @@ void main()
                 // Ambient contribution
                 lightContrib = ambientLight * baseColor;
                 
-                // ============================================================
-                // DIRECTIONAL LIGHTS with Phase Function
-                // ============================================================
-                for (int d = 0; d < MAX_DIR_LIGHTS; d++) {
-                    if (!dirLights[d].enabled) continue;
-                    
-                    vec3 lightDir = normalize(-dirLights[d].direction);
-                    float maxDist = distToBoundary(pos, lightDir);
-                    
-                    // Volumetric self-shadowing
-                    float volumeShadow = marchLightShadow(pos, lightDir, maxDist, shadowSamples);
-                    
-                    // Phase function for scattering highlights
-                    float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
-                    
-                    lightContrib += dirLights[d].color * dirLights[d].intensity * 
-                                   phase * volumeShadow * volumeScattering * baseColor;
-                }
                 
                 // ============================================================
                 // POINT LIGHTS with Phase Function + Shadow Maps
@@ -1917,38 +1868,7 @@ float volumeShadow = marchLightShadow(pos, lightDir, maxMarchDist, shadowSamples
                     
                     lightContrib += lightColors[p] * attenuation * shadow * 
                                    phase * volumeScattering * baseColor;
-                }
                 
-                // ============================================================
-                // SPOT LIGHTS with Phase Function
-                // ============================================================
-                for (int s = 0; s < MAX_SPOT_LIGHTS; s++) {
-                    if (!spotLights[s].enabled) continue;
-                    
-                    vec3 toLight = spotLights[s].position - pos;
-                    float dist = length(toLight);
-                    vec3 lightDir = toLight / dist;
-                    
-                    // Spot cone check
-                    float theta = dot(lightDir, normalize(-spotLights[s].direction));
-                    float epsilon = spotLights[s].cutOff - spotLights[s].outerCutOff;
-                    float spotEffect = clamp((theta - spotLights[s].outerCutOff) / epsilon, 0.0, 1.0);
-                    
-                    if (spotEffect > 0.0) {
-                        float attenuation = spotLights[s].intensity / 
-                            (spotLights[s].constant + 
-                             spotLights[s].linear * dist + 
-                             spotLights[s].quadratic * dist * dist);
-                        
-                        // Volumetric self-shadowing
-                        float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
-                        
-                        // Phase function for scattering highlights
-                        float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
-                        
-                        lightContrib += spotLights[s].color * attenuation * spotEffect *
-                                       phase * volumeShadow * volumeScattering * baseColor;
-                    }
                 }
             } else {
                 // No lighting - just use base color
@@ -3233,26 +3153,6 @@ void updateFluidVisualization() {
 
 
 
-void setVolumeLightUniforms(GLuint program) {
-    glUseProgram(program);
-
-    // Count enabled lights
-    int numSpot = 0, numDir = 0;
-
-    // Set directional lights
-    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
-        std::string base = "dirLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(dirLights[i].direction));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(dirLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), dirLights[i].intensity);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), dirLights[i].enabled ? 1 : 0);
-        if (dirLights[i].enabled) numDir++;
-    }
-
-    // Set light counts (but NOT numPointLights - that's handled elsewhere)
-    glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
-}
-
 
 void draw_fluid_fast() {
     if (!fluidInitialized) return;
@@ -3330,7 +3230,7 @@ void draw_fluid_fast() {
         // ====================================================================
         // SET ADDITIONAL LIGHT UNIFORMS (directional, spot lights)
         // ====================================================================
-        setVolumeLightUniforms(volumeRenderProgram);
+
 
         // ====================================================================
         // CAMERA AND GRID UNIFORMS
