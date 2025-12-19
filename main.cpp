@@ -2286,7 +2286,6 @@ void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color
     light.position = pos;
     light.intensity = intensity;
     light.color = color;
-    light.enabled = true;  // IMPORTANT: Enable the light!
     light.nearPlane = 0.1f;
     light.farPlane = 100.0f;
 
@@ -2331,9 +2330,8 @@ void initShadowMaps() {
         return;
     }
 
-    // Add default point lights
+    // Add default point light
     addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0f, glm::vec3(1.0f, 1.0f, 1.0f));
-    addPointLight(glm::vec3(-15.0f, 15.0f, -15.0f), 300.0f, glm::vec3(0.8f, 0.9f, 1.0f));
 
     cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
 }
@@ -3228,15 +3226,16 @@ void updateFluidVisualization() {
     glBindVertexArray(0);
 }
 
-// ============================================================================
-// SET VOLUME LIGHT UNIFORMS
-// Helper function to set all light uniforms for the volume shader
-// ============================================================================
+
+
+
+
+
 void setVolumeLightUniforms(GLuint program) {
     glUseProgram(program);
 
     // Count enabled lights
-    int numPoint = 0, numSpot = 0, numDir = 0;
+    int numSpot = 0, numDir = 0;
 
     // Set directional lights
     for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
@@ -3248,18 +3247,8 @@ void setVolumeLightUniforms(GLuint program) {
         if (dirLights[i].enabled) numDir++;
     }
 
-    // Set point lights from existing shadow-mapped pointLights array
-    for (size_t i = 0; i < pointLights.size() && i < 8; i++) {
-        std::string base = "pointLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(pointLights[i].position));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(pointLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), pointLights[i].intensity);
-        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), 1.0f);
-        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), 0.09f);
-        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), 0.032f);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), pointLights[i].enabled ? 1 : 0);
-        if (pointLights[i].enabled) numPoint++;
-    }
+    // NOTE: Point lights are set separately using lightPositions[], lightIntensities[], etc.
+    // Do NOT set them here with struct-style names - it would conflict with the correct uniforms
 
     // Set spot lights
     for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
@@ -3277,11 +3266,11 @@ void setVolumeLightUniforms(GLuint program) {
         if (spotLights[i].enabled) numSpot++;
     }
 
-    // Set light counts
+    // Set light counts (but NOT numPointLights - that's handled elsewhere)
     glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
-    glUniform1i(glGetUniformLocation(program, "numPointLights"), numPoint);
     glUniform1i(glGetUniformLocation(program, "numSpotLights"), numSpot);
 }
+
 
 void draw_fluid_fast() {
     if (!fluidInitialized) return;
@@ -3854,6 +3843,9 @@ void reshape_func(int width, int height)
 
     if (textRenderer)
         textRenderer->setProjection(win_x, win_y);
+
+    cleanupShadowMaps();
+    initShadowMaps();
 }
 
 void draw_objects(void)

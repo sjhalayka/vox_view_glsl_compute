@@ -184,6 +184,7 @@ bool fluidInitialized = false;
 
 const int MAX_SPOT_LIGHTS = 8;
 const int MAX_DIR_LIGHTS = 4;
+const int MAX_POINT_LIGHTS = 4;
 
 struct SpotLight {
 	glm::vec3 position;
@@ -219,6 +220,30 @@ struct DirectionalLight {
 std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
 std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
 
+
+// Point light structure
+struct PointLight {
+	glm::vec3 position;
+	float intensity;
+	glm::vec3 color;
+	bool enabled;  // NEW: Toggle light on/off
+
+	// Shadow map data
+	GLuint depthCubemap;
+	GLuint shadowFBO;
+	float nearPlane;
+	float farPlane;
+
+	PointLight() : position(20.0f, 20.0f, 20.0f), intensity(1.0f), color(1.0f, 1.0f, 1.0f),
+		enabled(true), depthCubemap(0), shadowFBO(0), nearPlane(0.1f), farPlane(100.0f) {
+	}
+};
+
+// Global point lights
+std::vector<PointLight> pointLights(MAX_POINT_LIGHTS);
+
+
+
 // Material properties
 struct Material {
 	float ambient;
@@ -235,6 +260,19 @@ void initDefaultLights() {
 	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
 	dirLights[0].intensity = 0.8f;
 	dirLights[0].enabled = true;
+
+	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	//pointLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	//pointLights[0].intensity = 5000.0f;
+	//pointLights[0].enabled = true;
+
+	//spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	//spotLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
+	//spotLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	//spotLights[0].intensity = 5000.0f;
+	//spotLights[0].enabled = true;
+
+
 }
 
 // Fluid SSBOs
@@ -408,27 +446,6 @@ struct RenderVertex {
 // ============================================================================
 // POINT LIGHT SHADOW MAPPING
 // ============================================================================
-
-// Point light structure
-struct PointLight {
-	glm::vec3 position;
-	float intensity;
-	glm::vec3 color;
-	bool enabled;  // NEW: Toggle light on/off
-
-	// Shadow map data
-	GLuint depthCubemap;
-	GLuint shadowFBO;
-	float nearPlane;
-	float farPlane;
-
-	PointLight() : position(20.0f, 20.0f, 20.0f), intensity(1.0f), color(1.0f, 1.0f, 1.0f),
-		enabled(true), depthCubemap(0), shadowFBO(0), nearPlane(0.1f), farPlane(100.0f) {
-	}
-};
-
-// Global point lights
-std::vector<PointLight> pointLights;
 
 // Shadow map settings
 const int SHADOW_MAP_SIZE = 1024;
