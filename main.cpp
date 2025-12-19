@@ -2286,6 +2286,7 @@ void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color
     light.position = pos;
     light.intensity = intensity;
     light.color = color;
+    light.enabled = true;  // IMPORTANT: Enable the light!
     light.nearPlane = 0.1f;
     light.farPlane = 100.0f;
 
@@ -2330,8 +2331,9 @@ void initShadowMaps() {
         return;
     }
 
-    // Add default point light
+    // Add default point lights
     addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+    addPointLight(glm::vec3(-15.0f, 15.0f, -15.0f), 300.0f, glm::vec3(0.8f, 0.9f, 1.0f));
 
     cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
 }
