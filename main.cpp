@@ -1850,7 +1850,7 @@ void main()
                     
                     // Attenuation -- fake the distance using a custom attenuation
                     // This makes smoke highlights noticeable
-                    float attenuation = lightIntensities[p] / (pow(dist, 1.65));
+                    float attenuation = lightIntensities[p] / (pow(dist, 1.7) + 1.0);
                     
                     // Shadow from solid geometry (shadow cubemaps)
                     float solidShadow = sampleVolumeShadow(p, pos);
