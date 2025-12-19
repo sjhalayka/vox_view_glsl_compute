@@ -2333,8 +2333,7 @@ void initShadowMaps() {
         return;
     }
 
-    // Add default point light
-    addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0, glm::vec3(1.0f, 1.0f, 1.0f));
+    initDefaultLights();
 
     cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
 }
@@ -3829,6 +3828,7 @@ void reshape_func(int width, int height)
 
     cleanupShadowMaps();
     initShadowMaps();
+
 }
 
 void draw_objects(void)
@@ -3882,22 +3882,29 @@ void idle_func(void) {
             accumulator -= fluidParams.dt;
         }
 
+
+        size_t enabled_count = 0;
+
+        for (size_t i = 0; i < pointLights.size(); i++)
+            if (pointLights[i].enabled)
+                enabled_count++;
+
         if (injectDensity || injectVelocity) {
             mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
             addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
             lastMouseWorldPos = currentMouseWorldPos;
 
-            if (pointLights.size() < 2)
+            if (enabled_count < 2)
                 addPointLight(currentMouseWorldPos, 500.0, glm::vec3(1.0, 0.0, 0.0));
             else
             {
                 pointLights[1].position = currentMouseWorldPos;
-                pointLights[1].enabled = false;
+                pointLights[1].enabled = true;
             }
         }
         else
         {
-            if (pointLights.size() == 2)
+            if (enabled_count == 2)
                 pointLights[1].enabled = false;
         }
 
@@ -4459,9 +4466,6 @@ int main(int argc, char** argv)
     initFluidSimulation();
 
     initShadowMaps();
-
-    // Initialize default lights for volume rendering
-    initDefaultLights();
 
     // Update obstacles from voxel collisions
     updateFluidObstacles();

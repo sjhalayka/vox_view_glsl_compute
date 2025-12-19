@@ -185,6 +185,16 @@ bool fluidInitialized = false;
 const int MAX_DIR_LIGHTS = 4;
 const int MAX_POINT_LIGHTS = 4;
 
+// Shadow map settings
+const int SHADOW_MAP_SIZE = 1024;
+GLuint shadowMapProgram = 0;
+
+// Function declarations for shadow mapping
+void initShadowMaps();
+void renderShadowMaps();
+void cleanupShadowMaps();
+void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color = glm::vec3(1.0f));
+
 
 
 struct DirectionalLight {
@@ -241,10 +251,12 @@ void initDefaultLights() {
 	//dirLights[0].intensity = 0.8f;
 	//dirLights[0].enabled = true;
 
-	pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
-	pointLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	pointLights[0].intensity = 1.0;
-	pointLights[0].enabled = true;
+	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	//pointLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	//pointLights[0].intensity = 1.0;
+	//pointLights[0].enabled = true;
+		// Add default point light
+	addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0, glm::vec3(1.0f, 1.0f, 1.0f));
 
 }
 
@@ -419,16 +431,6 @@ struct RenderVertex {
 // ============================================================================
 // POINT LIGHT SHADOW MAPPING
 // ============================================================================
-
-// Shadow map settings
-const int SHADOW_MAP_SIZE = 1024;
-GLuint shadowMapProgram = 0;
-
-// Function declarations for shadow mapping
-void initShadowMaps();
-void renderShadowMaps();
-void cleanupShadowMaps();
-void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color = glm::vec3(1.0f));
 
 
 
