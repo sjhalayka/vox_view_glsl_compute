@@ -125,7 +125,7 @@ std::vector<VoxelObjectGPUData> voxelObjectGPUData;
 
 // Fluid simulation parameters
 struct FluidParams {
-	float dt = 1.0f / 30.0f;              // Time step (~60 fps)
+	float dt = 1.0f/30.0f;              // Time step (~60 fps)
 	float viscosity = 0.0001f;      // Kinematic viscosity
 	float diffusion = 0.0001f;      // Density diffusion rate
 	int jacobiIterations = 20;      // Pressure solver iterations
@@ -158,84 +158,11 @@ struct FluidParams {
 
 	// Visualization
 	bool visualizeTemperature = false;    // Show temperature instead of density
-
-	// ============================================================================
-	// Volume lighting parameters (for phase function scattering)
-	// ============================================================================
-	float volumeAbsorption = 1.0f;           // How much light is absorbed per unit density
-	float volumeScattering = 0.8f;           // Scattering coefficient (0-1)
-	int shadowSamples = 16;                  // Number of samples for self-shadowing
-	float shadowDensityScale = 5.0f;         // Density multiplier for shadow rays
-	float phaseG = 0.0f;                     // Phase function asymmetry (-1 to 1, 0 = isotropic)
-	// Positive = forward scattering (bright when looking toward light)
-	// Negative = backward scattering (bright when looking away from light)
-	bool enableVolumeShadows = true;         // Toggle volume self-shadowing
-	bool enableVolumeLighting = true;        // Toggle volume lighting
 };
 
 FluidParams fluidParams;
 bool fluidSimEnabled = true;
 bool fluidInitialized = false;
-
-// ============================================================================
-// ADDITIONAL LIGHTING STRUCTURES (for volume rendering with phase function)
-// Note: PointLight is already defined later with shadow mapping support
-// ============================================================================
-
-const int MAX_SPOT_LIGHTS = 8;
-const int MAX_DIR_LIGHTS = 4;
-
-struct SpotLight {
-	glm::vec3 position;
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	float cutOff;       // Inner cone angle (cosine)
-	float outerCutOff;  // Outer cone angle (cosine)
-	float constant;
-	float linear;
-	float quadratic;
-	bool enabled;
-
-	SpotLight() : position(0.0f), direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), cutOff(glm::cos(glm::radians(12.5f))),
-		outerCutOff(glm::cos(glm::radians(17.5f))),
-		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
-	}
-};
-
-struct DirectionalLight {
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	bool enabled;
-
-	DirectionalLight() : direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), enabled(false) {
-	}
-};
-
-// Global additional light arrays
-std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
-std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
-
-// Material properties
-struct Material {
-	float ambient;
-	float shininess;
-	Material() : ambient(0.1f), shininess(32.0f) {}
-};
-
-Material globalMaterial;
-
-// Initialize default lights (call after initShadowMaps adds the point light)
-void initDefaultLights() {
-	// One directional light (sun-like)
-	dirLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
-	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	dirLights[0].intensity = 0.8f;
-	dirLights[0].enabled = true;
-}
 
 // Fluid SSBOs
 GLuint velocitySSBO[2] = { 0, 0 };      // Double buffered velocity (vec4: vx, vy, vz, 0)

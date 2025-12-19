@@ -1,4 +1,5 @@
-﻿#include "stb_image.h"
+﻿
+#include "stb_image.h"
 
 #include "main.h"
 #include "shader_utils.h"
@@ -1662,7 +1663,7 @@ uniform float stepSize;
 uniform int maxSteps;
 
 // ============================================================================
-// POINT LIGHT UNIFORMS (for shadow cubemaps)
+// POINT LIGHT UNIFORMS
 // ============================================================================
 #define MAX_POINT_LIGHTS 8
 
@@ -1676,66 +1677,18 @@ uniform int lightEnabled[MAX_POINT_LIGHTS];
 uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
 
 // ============================================================================
-// ADDITIONAL LIGHT STRUCTURES (for phase function)
+// SHADOW SAMPLING FOR VOLUMES
 // ============================================================================
-#define MAX_SPOT_LIGHTS 8
-#define MAX_DIR_LIGHTS 4
 
-struct SpotLight {
-    vec3 position;
-    vec3 direction;
-    vec3 color;
-    float intensity;
-    float cutOff;
-    float outerCutOff;
-    float constant;
-    float linear;
-    float quadratic;
-    bool enabled;
-};
-
-struct DirLight {
-    vec3 direction;
-    vec3 color;
-    float intensity;
-    bool enabled;
-};
-
-uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
-uniform DirLight dirLights[MAX_DIR_LIGHTS];
-
-uniform int numSpotLights;
-uniform int numDirLights;
-
-// ============================================================================
-// VOLUME LIGHTING PARAMETERS
-// ============================================================================
-uniform float volumeAbsorption;
-uniform float volumeScattering;
-uniform int shadowSamples;
-uniform float shadowDensityScale;
-uniform float phaseG;              // Phase function asymmetry: -1 to 1
-uniform bool enableVolumeShadows;
-uniform bool enableVolumeLighting;
-uniform vec3 ambientLight;
-
-// ============================================================================
-// HENYEY-GREENSTEIN PHASE FUNCTION
-// ============================================================================
-float phaseHG(float cosTheta, float g) {
-    if (abs(g) < 0.001) return 1.0;  // Isotropic scattering
-    float g2 = g * g;
-    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
-    return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
-}
-
-// ============================================================================
-// SHADOW CUBEMAP SAMPLING (for solid geometry shadows)
-// ============================================================================
+// Sample shadow for a point in the volume
+// Returns 0.0 = fully shadowed, 1.0 = fully lit
 float sampleVolumeShadow(int lightIndex, vec3 worldPos) {
     vec3 fragToLight = worldPos - lightPositions[lightIndex];
     float currentDepth = length(fragToLight);
     float farPlane = lightFarPlanes[lightIndex];
+    
+    // Normalize for cubemap lookup
+    vec3 dir = normalize(fragToLight);
     
     float closestDepth;
     if (lightIndex == 0) closestDepth = texture(shadowMaps[0], fragToLight).r;
@@ -1749,19 +1702,19 @@ float sampleVolumeShadow(int lightIndex, vec3 worldPos) {
     
     closestDepth *= farPlane;
     
-    // Soft bias for volumes
+    // Soft bias for volumes (larger than surface bias)
     float bias = 0.5;
     
     return (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
 }
 
-// ============================================================================
-// VOLUMETRIC SELF-SHADOWING (light marching through smoke)
-// ============================================================================
-float marchLightShadow(vec3 samplePos, vec3 lightDir, float lightDist, int shadowSteps) {
-    if (!enableVolumeShadows) return 1.0;
+// March from sample point toward light to estimate in-scattering shadow
+// This creates volumetric self-shadowing within the smoke
+float marchLightShadow(vec3 samplePos, int lightIndex, int shadowSteps) {
+    vec3 lightDir = normalize(lightPositions[lightIndex] - samplePos);
+    float lightDist = length(lightPositions[lightIndex] - samplePos);
+    float shadowStepSize = min(lightDist, 5.0) / float(shadowSteps);
     
-    float shadowStepSize = min(lightDist, 10.0) / float(shadowSteps);
     float shadowDensity = 0.0;
     vec3 pos = samplePos;
     
@@ -1774,44 +1727,75 @@ float marchLightShadow(vec3 samplePos, vec3 lightDir, float lightDist, int shado
             break;
         }
         
-        // Check for obstacle (solid geometry blocks all light)
+        // Check for obstacle
         if (texture(obstacleTex, uvw).r > 0.5) {
-            return 0.0;
+            return 0.0; // Blocked by solid
         }
         
         // Accumulate density along light ray
-        shadowDensity += texture(densityTex, uvw).r * shadowStepSize * shadowDensityScale;
+        shadowDensity += texture(densityTex, uvw).r * shadowStepSize;
     }
     
     // Exponential falloff based on accumulated density
-    return exp(-shadowDensity);
+    return exp(-shadowDensity * 0.5);
 }
 
 // ============================================================================
-// DISTANCE TO VOLUME BOUNDARY
+// LIGHTING CALCULATION FOR VOLUME SAMPLE
 // ============================================================================
-float distToBoundary(vec3 pos, vec3 dir) {
-    vec3 invDir = 1.0 / (dir + vec3(0.0001));
-    vec3 t0 = (gridMin - pos) * invDir;
-    vec3 t1 = (gridMax - pos) * invDir;
-    vec3 tmax = max(t0, t1);
-    return max(0.0, min(min(tmax.x, tmax.y), tmax.z));
+
+vec3 calculateVolumeLighting(vec3 worldPos, float density) {
+    vec3 totalLight = vec3(0.0);
+    
+    // Ambient contribution
+    vec3 ambient = vec3(0.15);
+    totalLight += ambient;
+    
+    // Process each point light
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
+        if (lightEnabled[i] == 0) continue;
+        
+        vec3 toLight = lightPositions[i] - worldPos;
+        float dist = length(toLight);
+        
+        // Attenuation (inverse square with intensity)
+        float attenuation = lightIntensities[i] / (dist * dist + 1.0);
+        
+        // Shadow from solid geometry (shadow maps)
+        float solidShadow = sampleVolumeShadow(i, worldPos);
+        
+        // Volumetric self-shadowing (light marching through smoke)
+        // Use fewer steps for performance (4-8 is usually enough)
+        float volumeShadow = marchLightShadow(worldPos, i, 6);
+        
+        // Combined shadow factor
+        float shadow = solidShadow * volumeShadow;
+        
+        // Add light contribution
+        totalLight += lightColors[i] * attenuation * shadow;
+    }
+    
+    return totalLight;
 }
 
 // ============================================================================
-// HEAT COLOR (for temperature visualization)
+// HEAT COLOR (unchanged from original)
 // ============================================================================
+
 vec3 heatColor(float t) {
-    return 5.0 * mix(mix(vec3(0.0), vec3(1.0, 0.0, 0.0), t),
-               mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), t*t), smoothstep(0.5, 1.0, t));
+    return 5.0 * mix(
+        mix(vec3(0.0), vec3(1.0, 0.0, 0.0), t),
+        mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), t * t),
+        smoothstep(0.5, 1.0, t)
+    );
 }
 
 // ============================================================================
 // MAIN RAY MARCHING LOOP
 // ============================================================================
-void main()
-{
-    // Reconstruct ray from screen coordinates
+
+void main() {
+    // Ray origin and direction in world space
     vec4 near = vec4(vTexCoord * 2.0 - 1.0, -1.0, 1.0);
     vec4 far  = vec4(vTexCoord * 2.0 - 1.0,  1.0, 1.0);
     vec4 nearWorld = invViewProj * near;
@@ -1839,16 +1823,17 @@ void main()
     float t = tenter;
     vec3 pos = rayOrigin + rayDir * t;
 
-    vec3 accumulatedColor = vec3(0.0);
+    vec4 color = vec4(0.0);
     float transmittance = 1.0;
 
-    for (int i = 0; i < maxSteps && t < texit; ++i)
-    {
+    for (int i = 0; i < maxSteps && t < texit; ++i) {
         vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
 
         // Check for obstacle
         float obs = texture(obstacleTex, uvw).r;
-        if (obs > 0.5) break;
+        if (obs > 0.5) {
+            break;
+        }
 
         float density = texture(densityTex, uvw).r;
         float temp = texture(temperatureTex, uvw).r;
@@ -1856,109 +1841,28 @@ void main()
         float sampleValue = visualizeTemperature ?
             max(temp - temperatureThreshold, 0.0) : density;
 
-        if (sampleValue > 0.01)
-        {
-            // Base color
-            vec3 baseColor = visualizeTemperature ?
-                heatColor(sampleValue * 0.1) : vec3(0.9, 0.9, 0.95);
-
-            vec3 lightContrib = vec3(0.0);
+        if (sampleValue > 0.01) {
+            // Calculate lighting at this sample point
+            vec3 lighting = calculateVolumeLighting(pos, sampleValue);
             
-            if (enableVolumeLighting) {
-                // Ambient contribution
-                lightContrib = ambientLight * baseColor;
-                
-                // ============================================================
-                // DIRECTIONAL LIGHTS with Phase Function
-                // ============================================================
-                for (int d = 0; d < MAX_DIR_LIGHTS; d++) {
-                    if (!dirLights[d].enabled) continue;
-                    
-                    vec3 lightDir = normalize(-dirLights[d].direction);
-                    float maxDist = distToBoundary(pos, lightDir);
-                    
-                    // Volumetric self-shadowing
-                    float volumeShadow = marchLightShadow(pos, lightDir, maxDist, shadowSamples);
-                    
-                    // Phase function for scattering highlights
-                    float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
-                    
-                    lightContrib += dirLights[d].color * dirLights[d].intensity * 
-                                   phase * volumeShadow * volumeScattering * baseColor;
-                }
-                
-                // ============================================================
-                // POINT LIGHTS with Phase Function + Shadow Maps
-                // ============================================================
-                for (int p = 0; p < numPointLights && p < MAX_POINT_LIGHTS; p++) {
-                    if (lightEnabled[p] == 0) continue;
-                    
-                    vec3 toLight = lightPositions[p] - pos;
-                    float dist = length(toLight);
-                    vec3 lightDir = toLight / dist;
-                    
-                    // Attenuation (inverse square)
-                    float attenuation = lightIntensities[p] / (dist * dist + 1.0);
-                    
-                    // Shadow from solid geometry (shadow cubemaps)
-                    float solidShadow = sampleVolumeShadow(p, pos);
-                    
-                    // Volumetric self-shadowing (light marching through smoke)
-                    float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
-                    
-                    // Combined shadow factor
-                    float shadow = solidShadow * volumeShadow;
-                    
-                    // Phase function for scattering highlights
-                    float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
-                    
-                    lightContrib += lightColors[p] * attenuation * shadow * 
-                                   phase * volumeScattering * baseColor;
-                }
-                
-                // ============================================================
-                // SPOT LIGHTS with Phase Function
-                // ============================================================
-                for (int s = 0; s < MAX_SPOT_LIGHTS; s++) {
-                    if (!spotLights[s].enabled) continue;
-                    
-                    vec3 toLight = spotLights[s].position - pos;
-                    float dist = length(toLight);
-                    vec3 lightDir = toLight / dist;
-                    
-                    // Spot cone check
-                    float theta = dot(lightDir, normalize(-spotLights[s].direction));
-                    float epsilon = spotLights[s].cutOff - spotLights[s].outerCutOff;
-                    float spotEffect = clamp((theta - spotLights[s].outerCutOff) / epsilon, 0.0, 1.0);
-                    
-                    if (spotEffect > 0.0) {
-                        float attenuation = spotLights[s].intensity / 
-                            (spotLights[s].constant + 
-                             spotLights[s].linear * dist + 
-                             spotLights[s].quadratic * dist * dist);
-                        
-                        // Volumetric self-shadowing
-                        float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
-                        
-                        // Phase function for scattering highlights
-                        float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
-                        
-                        lightContrib += spotLights[s].color * attenuation * spotEffect *
-                                       phase * volumeShadow * volumeScattering * baseColor;
-                    }
-                }
-            } else {
-                // No lighting - just use base color
-                lightContrib = baseColor;
-            }
+            // Absorption coefficient
+            float absorption = densityFactor * sampleValue * stepSize;
+            
+            // Base smoke color (can be tinted by temperature)
+            vec3 baseColor = visualizeTemperature ?
+                heatColor(sampleValue * 0.1) : vec3(0.8, 0.8, 0.9);
+            
+            // Apply lighting to smoke color
+            vec3 litColor = baseColor * lighting;
 
             // Beer-Lambert absorption
-            float absorption = volumeAbsorption * sampleValue * stepSize;
-            float sampleTrans = exp(-absorption);
-            
+            vec3 absorbed = exp(-absorption * vec3(1.0));
+            vec3 contrib = (1.0 - absorbed) * litColor;
+
             // Accumulate with front-to-back compositing
-            accumulatedColor += transmittance * (1.0 - sampleTrans) * lightContrib;
-            transmittance *= sampleTrans;
+            color.rgb += transmittance * contrib;
+            color.a += (1.0 - absorbed.x) * transmittance;
+            transmittance *= absorbed.x;
 
             // Early termination when nearly opaque
             if (transmittance < 0.01) break;
@@ -1968,11 +1872,11 @@ void main()
         pos = rayOrigin + rayDir * t;
     }
 
-    // Blend with background
+    // Background color blended with remaining transmittance
     vec3 backgroundColor = vec3(0.1, 0.15, 0.2);
-    accumulatedColor += transmittance * backgroundColor;
+    color.rgb += transmittance * backgroundColor;
     
-    FragColor = vec4(accumulatedColor, 1.0 - transmittance);
+    FragColor = color;
 }
 )";
 
@@ -3226,61 +3130,6 @@ void updateFluidVisualization() {
     glBindVertexArray(0);
 }
 
-// ============================================================================
-// SET VOLUME LIGHT UNIFORMS
-// Helper function to set all light uniforms for the volume shader
-// ============================================================================
-void setVolumeLightUniforms(GLuint program) {
-    glUseProgram(program);
-
-    // Count enabled lights
-    int numPoint = 0, numSpot = 0, numDir = 0;
-
-    // Set directional lights
-    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
-        std::string base = "dirLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(dirLights[i].direction));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(dirLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), dirLights[i].intensity);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), dirLights[i].enabled ? 1 : 0);
-        if (dirLights[i].enabled) numDir++;
-    }
-
-    // Set point lights from existing shadow-mapped pointLights array
-    for (size_t i = 0; i < pointLights.size() && i < 8; i++) {
-        std::string base = "pointLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(pointLights[i].position));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(pointLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), pointLights[i].intensity);
-        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), 1.0f);
-        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), 0.09f);
-        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), 0.032f);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), pointLights[i].enabled ? 1 : 0);
-        if (pointLights[i].enabled) numPoint++;
-    }
-
-    // Set spot lights
-    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
-        std::string base = "spotLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(spotLights[i].position));
-        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(spotLights[i].direction));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(spotLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), spotLights[i].intensity);
-        glUniform1f(glGetUniformLocation(program, (base + "cutOff").c_str()), spotLights[i].cutOff);
-        glUniform1f(glGetUniformLocation(program, (base + "outerCutOff").c_str()), spotLights[i].outerCutOff);
-        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), spotLights[i].constant);
-        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), spotLights[i].linear);
-        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), spotLights[i].quadratic);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), spotLights[i].enabled ? 1 : 0);
-        if (spotLights[i].enabled) numSpot++;
-    }
-
-    // Set light counts
-    glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
-    glUniform1i(glGetUniformLocation(program, "numPointLights"), numPoint);
-    glUniform1i(glGetUniformLocation(program, "numSpotLights"), numSpot);
-}
-
 void draw_fluid_fast() {
     if (!fluidInitialized) return;
 
@@ -3355,12 +3204,7 @@ void draw_fluid_fast() {
         }
 
         // ====================================================================
-        // SET ADDITIONAL LIGHT UNIFORMS (directional, spot lights)
-        // ====================================================================
-        setVolumeLightUniforms(volumeRenderProgram);
-
-        // ====================================================================
-        // CAMERA AND GRID UNIFORMS
+        // EXISTING UNIFORMS
         // ====================================================================
         glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
         glm::mat4 invViewProj = glm::inverse(viewProj);
@@ -3378,23 +3222,11 @@ void draw_fluid_fast() {
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"),
             fluidParams.visualizeTemperature ? 1 : 0);
 
-        // Ray marching parameters
+        // Volume rendering parameters
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "densityFactor"), 1.0f);
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "temperatureThreshold"), 1.0f);
-        glUniform1f(glGetUniformLocation(volumeRenderProgram, "stepSize"), 0.15f);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "maxSteps"), 256);
-
-        // ====================================================================
-        // VOLUME LIGHTING PARAMETERS (Phase Function Scattering)
-        // ====================================================================
-        glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeAbsorption"), fluidParams.volumeAbsorption);
-        glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeScattering"), fluidParams.volumeScattering);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "shadowSamples"), fluidParams.shadowSamples);
-        glUniform1f(glGetUniformLocation(volumeRenderProgram, "shadowDensityScale"), fluidParams.shadowDensityScale);
-        glUniform1f(glGetUniformLocation(volumeRenderProgram, "phaseG"), fluidParams.phaseG);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeShadows"), fluidParams.enableVolumeShadows ? 1 : 0);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeLighting"), fluidParams.enableVolumeLighting ? 1 : 0);
-        glUniform3f(glGetUniformLocation(volumeRenderProgram, "ambientLight"), 0.15f, 0.15f, 0.2f);
+        glUniform1f(glGetUniformLocation(volumeRenderProgram, "stepSize"), 0.2f);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "maxSteps"), 128);
 
         // Draw fullscreen quad
         glBindVertexArray(fullscreenVAO);
@@ -3850,8 +3682,8 @@ void reshape_func(int width, int height)
 
     main_camera.calculate_camera_matrices(win_x, win_y);
 
-    if (textRenderer)
-        textRenderer->setProjection(win_x, win_y);
+    if(textRenderer)
+   textRenderer->setProjection(win_x, win_y);
 }
 
 void draw_objects(void)
@@ -4103,37 +3935,7 @@ void keyboard_func(unsigned char key, int x, int y)
         cout << "Gravity: " << fluidParams.gravity << endl;
         break;
 
-        // ====================================================================
-        // VOLUME LIGHTING CONTROLS
-        // ====================================================================
-    case '9':
-        fluidParams.phaseG = std::max(-0.99f, fluidParams.phaseG - 0.1f);
-        cout << "Phase G (scattering): " << fluidParams.phaseG << " (negative = back scatter)" << endl;
-        break;
-    case '0':
-        fluidParams.phaseG = std::min(0.99f, fluidParams.phaseG + 0.1f);
-        cout << "Phase G (scattering): " << fluidParams.phaseG << " (positive = forward scatter)" << endl;
-        break;
-    case 'l':
-    case 'L':
-        fluidParams.enableVolumeLighting = !fluidParams.enableVolumeLighting;
-        cout << "Volume lighting: " << (fluidParams.enableVolumeLighting ? "ON" : "OFF") << endl;
-        break;
-    case 'k':
-    case 'K':
-        fluidParams.enableVolumeShadows = !fluidParams.enableVolumeShadows;
-        cout << "Volume shadows: " << (fluidParams.enableVolumeShadows ? "ON" : "OFF") << endl;
-        break;
-    case 'j':
-    case 'J':
-        fluidParams.volumeScattering = std::max(0.0f, fluidParams.volumeScattering - 0.1f);
-        cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
-        break;
-    case 'u':
-    case 'U':
-        fluidParams.volumeScattering = std::min(2.0f, fluidParams.volumeScattering + 0.1f);
-        cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
-        break;
+
 
     case 'o':
     {
@@ -4152,7 +3954,7 @@ void keyboard_func(unsigned char key, int x, int y)
         get_background_points_GPU(voxel_objects);
         updateTriangleBuffer(voxel_objects);
 
-        //        updateSurfacePointsForRendering(vo);
+//        updateSurfacePointsForRendering(vo);
         std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<float, std::milli> elapsed = end - start;
         cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
@@ -4483,9 +4285,6 @@ int main(int argc, char** argv)
 
     initShadowMaps();
 
-    // Initialize default lights for volume rendering
-    initDefaultLights();
-
     // Update obstacles from voxel collisions
     updateFluidObstacles();
 
@@ -4506,10 +4305,6 @@ int main(int argc, char** argv)
     cout << "3/4: Adjust buoyancy beta (temperature)" << endl;
     cout << "5/6: Adjust temperature injection amount" << endl;
     cout << "7/8: Adjust gravity strength" << endl;
-    cout << "\n--- Volume Lighting Controls ---" << endl;
-    cout << "9/0: Adjust phase function (scattering direction)" << endl;
-    cout << "L: Toggle volume lighting" << endl;
-    cout << "K: Toggle volume shadows" << endl;
     cout << "\nH: Show all controls" << endl;
     cout << "=================================\n" << endl;
 

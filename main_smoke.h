@@ -57,7 +57,7 @@ void cleanup(void);
 custom_math::vector_3 background_colour(0.5f, 0.5f, 0.5f);
 custom_math::vector_3 control_list_colour(1.0f, 1.0f, 1.0f);
 
-bool draw_axis = true;
+bool draw_axis = false;
 bool draw_control_list = true;
 bool draw_triangles_on_screen = true;
 uv_camera main_camera;
@@ -125,7 +125,7 @@ std::vector<VoxelObjectGPUData> voxelObjectGPUData;
 
 // Fluid simulation parameters
 struct FluidParams {
-	float dt = 1.0f / 30.0f;              // Time step (~60 fps)
+	float dt = 1.0f/30.0f;              // Time step (~60 fps)
 	float viscosity = 0.0001f;      // Kinematic viscosity
 	float diffusion = 0.0001f;      // Density diffusion rate
 	int jacobiIterations = 20;      // Pressure solver iterations
@@ -159,83 +159,20 @@ struct FluidParams {
 	// Visualization
 	bool visualizeTemperature = false;    // Show temperature instead of density
 
-	// ============================================================================
-	// Volume lighting parameters (for phase function scattering)
-	// ============================================================================
+	// Volume lighting parameters
 	float volumeAbsorption = 1.0f;           // How much light is absorbed per unit density
 	float volumeScattering = 0.8f;           // Scattering coefficient (0-1)
-	int shadowSamples = 16;                  // Number of samples for self-shadowing
-	float shadowDensityScale = 5.0f;         // Density multiplier for shadow rays
-	float phaseG = 0.0f;                     // Phase function asymmetry (-1 to 1, 0 = isotropic)
-	// Positive = forward scattering (bright when looking toward light)
-	// Negative = backward scattering (bright when looking away from light)
-	bool enableVolumeShadows = true;         // Toggle volume self-shadowing
-	bool enableVolumeLighting = true;        // Toggle volume lighting
+	int shadowSamples = 16;                   // Number of samples for self-shadowing
+	float shadowDensityScale = 5.0f;
+	float phaseG = 0.0f;                      // Phase function asymmetry (-1 to 1, 0 = isotropic)
+	bool enableVolumeShadows = true;          // Toggle volume self-shadowing
+	bool enableVolumeLighting = true;         // Toggle volume lighting
+
 };
 
 FluidParams fluidParams;
 bool fluidSimEnabled = true;
 bool fluidInitialized = false;
-
-// ============================================================================
-// ADDITIONAL LIGHTING STRUCTURES (for volume rendering with phase function)
-// Note: PointLight is already defined later with shadow mapping support
-// ============================================================================
-
-const int MAX_SPOT_LIGHTS = 8;
-const int MAX_DIR_LIGHTS = 4;
-
-struct SpotLight {
-	glm::vec3 position;
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	float cutOff;       // Inner cone angle (cosine)
-	float outerCutOff;  // Outer cone angle (cosine)
-	float constant;
-	float linear;
-	float quadratic;
-	bool enabled;
-
-	SpotLight() : position(0.0f), direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), cutOff(glm::cos(glm::radians(12.5f))),
-		outerCutOff(glm::cos(glm::radians(17.5f))),
-		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
-	}
-};
-
-struct DirectionalLight {
-	glm::vec3 direction;
-	glm::vec3 color;
-	float intensity;
-	bool enabled;
-
-	DirectionalLight() : direction(0.0f, -1.0f, 0.0f), color(1.0f),
-		intensity(1.0f), enabled(false) {
-	}
-};
-
-// Global additional light arrays
-std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
-std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
-
-// Material properties
-struct Material {
-	float ambient;
-	float shininess;
-	Material() : ambient(0.1f), shininess(32.0f) {}
-};
-
-Material globalMaterial;
-
-// Initialize default lights (call after initShadowMaps adds the point light)
-void initDefaultLights() {
-	// One directional light (sun-like)
-	dirLights[0].direction = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
-	dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
-	dirLights[0].intensity = 0.8f;
-	dirLights[0].enabled = true;
-}
 
 // Fluid SSBOs
 GLuint velocitySSBO[2] = { 0, 0 };      // Double buffered velocity (vec4: vx, vy, vz, 0)
@@ -401,48 +338,145 @@ GLuint volumeRenderProgram = 0;
 // Vertex structure for shader compatibility
 struct RenderVertex {
 	float position[3];
+	float normal[3];
 	float color[3];
-	float normal[3];  // NEW: Add normals for lighting
 };
 
 // ============================================================================
-// POINT LIGHT SHADOW MAPPING
+// LIGHTING STRUCTURES
 // ============================================================================
 
-// Point light structure
+const int MAX_POINT_LIGHTS = 8;
+const int MAX_SPOT_LIGHTS = 8;
+const int MAX_DIR_LIGHTS = 4;
+
 struct PointLight {
 	glm::vec3 position;
-	float intensity;
 	glm::vec3 color;
-	bool enabled;  // NEW: Toggle light on/off
+	float intensity;
+	float constant;     // Attenuation: 1.0
+	float linear;       // Attenuation: 0.09
+	float quadratic;    // Attenuation: 0.032
+	bool enabled;
 
-	// Shadow map data
-	GLuint depthCubemap;
-	GLuint shadowFBO;
-	float nearPlane;
-	float farPlane;
-
-	PointLight() : position(20.0f, 20.0f, 20.0f), intensity(1.0f), color(1.0f, 1.0f, 1.0f),
-		enabled(true), depthCubemap(0), shadowFBO(0), nearPlane(0.1f), farPlane(100.0f) {
+	PointLight() : position(0.0f), color(1.0f), intensity(1.0f),
+		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
 	}
 };
 
-// Global point lights
-std::vector<PointLight> pointLights;
+struct SpotLight {
+	glm::vec3 position;
+	glm::vec3 direction;
+	glm::vec3 color;
+	float intensity;
+	float cutOff;       // Inner cone angle (cosine)
+	float outerCutOff;  // Outer cone angle (cosine)
+	float constant;
+	float linear;
+	float quadratic;
+	bool enabled;
 
-// Shadow map settings
-const int SHADOW_MAP_SIZE = 1024;
-GLuint shadowMapProgram = 0;
+	SpotLight() : position(0.0f), direction(0.0f, -1.0f, 0.0f), color(1.0f),
+		intensity(1.0f), cutOff(glm::cos(glm::radians(12.5f))),
+		outerCutOff(glm::cos(glm::radians(17.5f))),
+		constant(1.0f), linear(0.09f), quadratic(0.032f), enabled(false) {
+	}
+};
 
-// Function declarations for shadow mapping
+struct DirectionalLight {
+	glm::vec3 direction;
+	glm::vec3 color;
+	float intensity;
+	bool enabled;
+
+	DirectionalLight() : direction(0.0f, -1.0f, 0.0f), color(1.0f),
+		intensity(1.0f), enabled(false) {
+	}
+};
+
+// Global light arrays
+std::vector<PointLight> pointLights(MAX_POINT_LIGHTS);
+std::vector<SpotLight> spotLights(MAX_SPOT_LIGHTS);
+std::vector<DirectionalLight> dirLights(MAX_DIR_LIGHTS);
+
+// Material properties
+struct Material {
+	float ambient;
+	float shininess;
+	Material() : ambient(0.1f), shininess(32.0f) {}
+};
+
+Material globalMaterial;
+
+// Initialize default lights
+void initDefaultLights() {
+	// One directional light (sun-like)
+	//dirLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
+	//dirLights[0].color = glm::vec3(1.0f, 0.98f, 0.95f);
+	//dirLights[0].intensity = 0.8f;
+	//dirLights[0].enabled = true;
+
+	// One point light
+	//pointLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	//pointLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	//pointLights[0].intensity = 50.0f;
+	//pointLights[0].enabled = true;
+
+	spotLights[0].position = glm::vec3(20.0f, 20.0f, 20.0f);
+	spotLights[0].direction = glm::normalize(glm::vec3(-10.0f, -10.0f, -10.0f));
+	spotLights[0].color = glm::vec3(1.0f, 0.9f, 0.8f);
+	spotLights[0].intensity = 50.0f;
+	spotLights[0].enabled = true;
+}
+
+
+// ============================================================================
+// SHADOW MAPPING STRUCTURES AND GLOBALS
+// ============================================================================
+
+// Shadow map resolution (higher = better quality, more memory)
+const int SHADOW_MAP_SIZE = 2048;
+const int POINT_SHADOW_MAP_SIZE = 1024;  // Cube maps are more expensive
+
+// Shadow map arrays for each light type
+GLuint dirLightShadowMaps[MAX_DIR_LIGHTS] = { 0 };
+GLuint dirLightShadowFBOs[MAX_DIR_LIGHTS] = { 0 };
+glm::mat4 dirLightSpaceMatrices[MAX_DIR_LIGHTS];
+
+GLuint spotLightShadowMaps[MAX_SPOT_LIGHTS] = { 0 };
+GLuint spotLightShadowFBOs[MAX_SPOT_LIGHTS] = { 0 };
+glm::mat4 spotLightSpaceMatrices[MAX_SPOT_LIGHTS];
+
+// Point lights use cube maps for omnidirectional shadows
+GLuint pointLightShadowCubeMaps[MAX_POINT_LIGHTS] = { 0 };
+GLuint pointLightShadowFBOs[MAX_POINT_LIGHTS] = { 0 };
+// 6 view matrices per point light (one for each cube face)
+glm::mat4 pointLightShadowMatrices[MAX_POINT_LIGHTS * 6];
+float pointLightFarPlanes[MAX_POINT_LIGHTS] = { 25.0f }; // Adjustable per light
+
+// Shadow rendering shader programs
+GLuint shadowDepthProgram = 0;           // For directional and spot lights
+GLuint pointShadowDepthProgram = 0;      // For point light cube maps
+
+// Shadow mapping parameters
+struct ShadowParams {
+	float bias = 0.0f;              // Depth bias to prevent shadow acne
+	float normalBias = 0.02f;         // Normal-based bias
+	int pcfSamples = 0;               // PCF kernel size (2 = 5x5 samples)
+	bool enableShadows = true;        // Global shadow toggle
+	float shadowIntensity = 0.5f;     // 0 = full shadow, 1 = no shadow effect
+};
+
+ShadowParams shadowParams;
+
+// Function declarations
 void initShadowMaps();
-void renderShadowMaps();
 void cleanupShadowMaps();
-void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color = glm::vec3(1.0f));
-
-
-
-
+void renderShadowMaps();
+void renderDirLightShadowMap(int lightIndex);
+void renderSpotLightShadowMap(int lightIndex);
+void renderPointLightShadowMap(int lightIndex);
+void setShadowUniforms(GLuint program);
 
 
 
@@ -664,12 +698,18 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	// Combine triangles from all voxel objects
 	for (auto& v : objects) {
 		for (size_t i = 0; i < v.tri_vec.size(); i++) {
-			// Transform normal by model matrix (use inverse transpose for correct normal transformation)
+			// Compute face normal from triangle vertices
+			glm::vec3 v0(v.tri_vec[i].vertex[0].x, v.tri_vec[i].vertex[0].y, v.tri_vec[i].vertex[0].z);
+			glm::vec3 v1(v.tri_vec[i].vertex[1].x, v.tri_vec[i].vertex[1].y, v.tri_vec[i].vertex[1].z);
+			glm::vec3 v2(v.tri_vec[i].vertex[2].x, v.tri_vec[i].vertex[2].y, v.tri_vec[i].vertex[2].z);
+
+			glm::vec3 edge1 = v1 - v0;
+			glm::vec3 edge2 = v2 - v0;
+			glm::vec3 faceNormal = glm::normalize(glm::cross(edge1, edge2));
+
+			// Transform normal by model matrix (use normal matrix for correct transformation)
 			glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(v.model_matrix)));
-			glm::vec3 worldNormal = glm::normalize(normalMatrix * glm::vec3(
-				v.tri_vec[i].normal.x,
-				v.tri_vec[i].normal.y,
-				v.tri_vec[i].normal.z));
+			glm::vec3 worldNormal = glm::normalize(normalMatrix * faceNormal);
 
 			for (size_t j = 0; j < 3; j++) {
 				RenderVertex rv;
@@ -684,12 +724,12 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 				rv.position[0] = worldPos.x;
 				rv.position[1] = worldPos.y;
 				rv.position[2] = worldPos.z;
-				rv.color[0] = v.tri_vec[i].colour.x;
-				rv.color[1] = v.tri_vec[i].colour.y;
-				rv.color[2] = v.tri_vec[i].colour.z;
 				rv.normal[0] = worldNormal.x;
 				rv.normal[1] = worldNormal.y;
 				rv.normal[2] = worldNormal.z;
+				rv.color[0] = v.tri_vec[i].colour.x;
+				rv.color[1] = v.tri_vec[i].colour.y;
+				rv.color[2] = v.tri_vec[i].colour.z;
 				vertices.push_back(rv);
 				indices.push_back(static_cast<GLuint>(vertices.size() - 1));
 			}
@@ -711,15 +751,18 @@ void updateTriangleBuffer(std::vector<voxel_object>& objects) {
 	// Position attribute
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)0);
 	glEnableVertexAttribArray(0);
-	// Color attribute
+	// Normal attribute
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(3 * sizeof(float)));
 	glEnableVertexAttribArray(1);
-	// Normal attribute (NEW)
+	// Color attribute
 	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), (void*)(6 * sizeof(float)));
 	glEnableVertexAttribArray(2);
 
 	glBindVertexArray(0);
 }
+
+
+
 
 
 
@@ -989,121 +1032,125 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 
 				size_t neighbour_index = 0;
 
-				// Top face (+Y normal) - Note: normals assigned BEFORE rotation
+				// Note that this index is possibly out of range, 
+				// which is why it's used second in the if()
 				neighbour_index = x + (y + 1) * v.voxel_x_res + z * v.voxel_x_res * v.voxel_y_res;
 				if (y == v.voxel_y_res - 1 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q0.vertex[0];
 					t.vertex[1] = q0.vertex[1];
 					t.vertex[2] = q0.vertex[2];
-					t.normal = custom_math::vertex_3(0.0f, 1.0f, 0.0f);  // +Y
+
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q0.vertex[0];
 					t.vertex[1] = q0.vertex[2];
 					t.vertex[2] = q0.vertex[3];
-					t.normal = custom_math::vertex_3(0.0f, 1.0f, 0.0f);  // +Y
 					tri_vec.push_back(t);
 				}
 
-				// Bottom face (-Y normal)
+				// Note that this index is possibly out of range, 
+				// which is why it's used second in the if()
 				neighbour_index = x + (y - 1) * v.voxel_x_res + z * v.voxel_x_res * v.voxel_y_res;
 				if (y == 0 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q1.vertex[0];
 					t.vertex[1] = q1.vertex[1];
 					t.vertex[2] = q1.vertex[2];
-					t.normal = custom_math::vertex_3(0.0f, -1.0f, 0.0f);  // -Y
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q1.vertex[0];
 					t.vertex[1] = q1.vertex[2];
 					t.vertex[2] = q1.vertex[3];
-					t.normal = custom_math::vertex_3(0.0f, -1.0f, 0.0f);  // -Y
 					tri_vec.push_back(t);
 				}
 
-				// Front face (+Z normal)
+
+				// Note that this index is possibly out of range, 
+				// which is why it's used second in the if()
 				neighbour_index = x + y * v.voxel_x_res + (z + 1) * v.voxel_x_res * v.voxel_y_res;
 				if (z == v.voxel_z_res - 1 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q2.vertex[0];
 					t.vertex[1] = q2.vertex[1];
 					t.vertex[2] = q2.vertex[2];
-					t.normal = custom_math::vertex_3(0.0f, 0.0f, 1.0f);  // +Z
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q2.vertex[0];
 					t.vertex[1] = q2.vertex[2];
 					t.vertex[2] = q2.vertex[3];
-					t.normal = custom_math::vertex_3(0.0f, 0.0f, 1.0f);  // +Z
 					tri_vec.push_back(t);
 				}
 
-				// Back face (-Z normal)
+
+				// Note that this index is possibly out of range, 
+				// which is why it's used second in the if()
 				neighbour_index = x + (y)*v.voxel_x_res + (z - 1) * v.voxel_x_res * v.voxel_y_res;
 				if (z == 0 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q3.vertex[0];
 					t.vertex[1] = q3.vertex[1];
 					t.vertex[2] = q3.vertex[2];
-					t.normal = custom_math::vertex_3(0.0f, 0.0f, -1.0f);  // -Z
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q3.vertex[0];
 					t.vertex[1] = q3.vertex[2];
 					t.vertex[2] = q3.vertex[3];
-					t.normal = custom_math::vertex_3(0.0f, 0.0f, -1.0f);  // -Z
 					tri_vec.push_back(t);
 				}
 
-				// Right face (+X normal)
+
+				// Note that this index is possibly out of range, 
+				// which is why it's used second in the if()
 				neighbour_index = (x + 1) + (y)*v.voxel_x_res + (z)*v.voxel_x_res * v.voxel_y_res;
 				if (x == v.voxel_x_res - 1 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q4.vertex[0];
 					t.vertex[1] = q4.vertex[1];
 					t.vertex[2] = q4.vertex[2];
-					t.normal = custom_math::vertex_3(1.0f, 0.0f, 0.0f);  // +X
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q4.vertex[0];
 					t.vertex[1] = q4.vertex[2];
 					t.vertex[2] = q4.vertex[3];
-					t.normal = custom_math::vertex_3(1.0f, 0.0f, 0.0f);  // +X
 					tri_vec.push_back(t);
 				}
 
-				// Left face (-X normal)
+				// Note that this index is possibly out of range, 
+				// which is why it's used second in the if()
 				neighbour_index = (x - 1) + (y)*v.voxel_x_res + (z)*v.voxel_x_res * v.voxel_y_res;
 				if (x == 0 || 0 == v.voxel_densities[neighbour_index])
 				{
 					t.vertex[0] = q5.vertex[0];
 					t.vertex[1] = q5.vertex[1];
 					t.vertex[2] = q5.vertex[2];
-					t.normal = custom_math::vertex_3(-1.0f, 0.0f, 0.0f);  // -X
 					tri_vec.push_back(t);
 
 					t.vertex[0] = q5.vertex[0];
 					t.vertex[1] = q5.vertex[2];
 					t.vertex[2] = q5.vertex[3];
-					t.normal = custom_math::vertex_3(-1.0f, 0.0f, 0.0f);  // -X
 					tri_vec.push_back(t);
 				}
 			}
 		}
 	}
 
+
+
 	cout << tri_vec.size() << endl;
 
-	// Rotate vertices and normals
+
+
+
+
+
+
 	for (size_t i = 0; i < tri_vec.size(); i++)
 	{
 		static const float pi = 4.0f * atanf(1.0f);
 		tri_vec[i].vertex[0].rotate_x(pi - pi / 2.0f);
 		tri_vec[i].vertex[1].rotate_x(pi - pi / 2.0f);
 		tri_vec[i].vertex[2].rotate_x(pi - pi / 2.0f);
-		tri_vec[i].normal.rotate_x(pi - pi / 2.0f);  // Rotate normal too!
 	}
 
 	for (size_t i = 0; i < v.voxel_centres.size(); i++)
@@ -1112,10 +1159,9 @@ bool get_triangles(vector<custom_math::triangle>& tri_vec, voxel_object& v)
 		v.voxel_centres[i].rotate_x(pi - pi / 2.0f);
 	}
 
+
 	return true;
 }
-
-
 
 
 
@@ -1656,7 +1702,7 @@ GLuint mcNormalVBO = 0;
 const size_t MC_MAX_VERTICES = x_res * y_res * z_res * 5 * 3; // Max 5 triangles per cell
 
 // Toggle for marching cubes vs ray marching
-bool useMarchingCubes = true;
+bool useMarchingCubes = false;
 
 // ============================================================================
 // MARCHING CUBES - Function Declarations

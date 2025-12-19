@@ -1,4 +1,5 @@
-﻿#include "stb_image.h"
+﻿
+#include "stb_image.h"
 
 #include "main.h"
 #include "shader_utils.h"
@@ -375,6 +376,73 @@ void displayFPS()
 
 
 
+
+// ============================================================================
+// Helper function to set light uniforms for a shader program
+// ============================================================================
+
+void setLightUniforms(GLuint program) {
+    glUseProgram(program);
+
+    // Set view position
+    glUniform3fv(glGetUniformLocation(program, "viewPos"), 1, &main_camera.eye.x);
+
+    // Set material properties
+    glUniform1f(glGetUniformLocation(program, "ambientStrength"), globalMaterial.ambient);
+    glUniform1f(glGetUniformLocation(program, "shininess"), globalMaterial.shininess);
+
+    // Count enabled lights
+    int numPoint = 0, numSpot = 0, numDir = 0;
+
+    // Set directional lights
+    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
+        std::string base = "dirLights[" + std::to_string(i) + "].";
+        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(dirLights[i].direction));
+        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(dirLights[i].color));
+        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), dirLights[i].intensity);
+        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), dirLights[i].enabled ? 1 : 0);
+        if (dirLights[i].enabled) numDir++;
+    }
+
+    // Set point lights
+    for (int i = 0; i < MAX_POINT_LIGHTS; i++) {
+        std::string base = "pointLights[" + std::to_string(i) + "].";
+        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(pointLights[i].position));
+        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(pointLights[i].color));
+        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), pointLights[i].intensity);
+        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), pointLights[i].constant);
+        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), pointLights[i].linear);
+        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), pointLights[i].quadratic);
+        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), pointLights[i].enabled ? 1 : 0);
+        if (pointLights[i].enabled) numPoint++;
+    }
+
+    // Set spot lights
+    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
+        std::string base = "spotLights[" + std::to_string(i) + "].";
+        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(spotLights[i].position));
+        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(spotLights[i].direction));
+        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(spotLights[i].color));
+        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), spotLights[i].intensity);
+        glUniform1f(glGetUniformLocation(program, (base + "cutOff").c_str()), spotLights[i].cutOff);
+        glUniform1f(glGetUniformLocation(program, (base + "outerCutOff").c_str()), spotLights[i].outerCutOff);
+        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), spotLights[i].constant);
+        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), spotLights[i].linear);
+        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), spotLights[i].quadratic);
+        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), spotLights[i].enabled ? 1 : 0);
+        if (spotLights[i].enabled) numSpot++;
+    }
+
+    // Set light counts
+    glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
+    glUniform1i(glGetUniformLocation(program, "numPointLights"), numPoint);
+    glUniform1i(glGetUniformLocation(program, "numSpotLights"), numSpot);
+}
+
+
+
+
+
 const char* marchingCubesComputeShader = R"(
 #version 430 core
 
@@ -580,45 +648,152 @@ void main() {
 const char* mcFragmentShaderSource = R"(
 #version 430 core
 
+#define MAX_POINT_LIGHTS 8
+#define MAX_SPOT_LIGHTS 8
+#define MAX_DIR_LIGHTS 4
+
 in vec3 fragPos;
 in vec3 fragNormal;
 
-uniform vec3 viewPos;
-uniform vec4 layerColor;  // RGB + alpha
-uniform vec3 lightDir;
-
 out vec4 FragColor;
 
+// Point Light
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+// Spot Light
+struct SpotLight {
+    vec3 position;
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    float cutOff;
+    float outerCutOff;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+// Directional Light
+struct DirLight {
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    bool enabled;
+};
+
+uniform PointLight pointLights[MAX_POINT_LIGHTS];
+uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
+uniform DirLight dirLights[MAX_DIR_LIGHTS];
+
+uniform int numPointLights;
+uniform int numSpotLights;
+uniform int numDirLights;
+
+uniform vec3 viewPos;
+uniform vec4 layerColor;
+uniform float ambientStrength;
+uniform float shininess;
+
+// Calculate directional light contribution
+vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(-light.direction);
+    
+    // Diffuse (use abs for double-sided)
+    float diff = abs(dot(normal, lightDir));
+    
+    // Specular (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(abs(dot(normal, halfwayDir)), 0.0), shininess);
+    
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.3;
+    
+    return (diffuse + specular) * baseColor;
+}
+
+// Calculate point light contribution
+vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    float diff = abs(dot(normal, lightDir));
+    
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(abs(dot(normal, halfwayDir)), 0.0), shininess);
+    
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.3;
+    
+    return (diffuse + specular) * attenuation * baseColor;
+}
+
+// Calculate spot light contribution
+vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    float diff = abs(dot(normal, lightDir));
+    
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(abs(dot(normal, halfwayDir)), 0.0), shininess);
+    
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    float theta = dot(lightDir, normalize(-light.direction));
+    float epsilon = light.cutOff - light.outerCutOff;
+    float spotIntensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+    
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.3;
+    
+    return (diffuse + specular) * attenuation * spotIntensity * baseColor;
+}
+
 void main() {
-
-    FragColor = layerColor;
-    return;
-
-    //vec3 normal = normalize(fragNormal);
-
-    //// Simple directional lighting
-    //vec3 lightColor = vec3(1.0);
-    //float ambientStrength = 0.3;
-    //vec3 ambient = ambientStrength * lightColor;
-    //
-    //// Diffuse - use abs for double-sided lighting
-    //float diff = abs(dot(normal, normalize(-lightDir)));
-    //vec3 diffuse = diff * lightColor;
-    //
-    //// Specular
-    //vec3 viewDir = normalize(viewPos - fragPos);
-    //vec3 reflectDir = reflect(normalize(lightDir), normal);
-    //float spec = pow(max(abs(dot(viewDir, reflectDir)), 0.0), 32.0);
-    //vec3 specular = 0.3 * spec * lightColor;
-    //
-    //vec3 lighting = ambient + diffuse + specular;
-    //vec3 finalColor = lighting * layerColor.rgb;
-    //
-    //FragColor = vec4(finalColor, layerColor.a);
+    vec3 norm = normalize(fragNormal);
+    vec3 viewDir = normalize(viewPos - fragPos);
+    
+    vec3 baseColor = layerColor.rgb;
+    
+    // Ambient
+    vec3 ambient = ambientStrength * baseColor;
+    vec3 result = ambient;
+    
+    // Directional lights
+    for (int i = 0; i < numDirLights && i < MAX_DIR_LIGHTS; i++) {
+        result += CalcDirLight(dirLights[i], norm, viewDir, baseColor);
+    }
+    
+    // Point lights
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
+        result += CalcPointLight(pointLights[i], norm, fragPos, viewDir, baseColor);
+    }
+    
+    // Spot lights
+    for (int i = 0; i < numSpotLights && i < MAX_SPOT_LIGHTS; i++) {
+        result += CalcSpotLight(spotLights[i], norm, fragPos, viewDir, baseColor);
+    }
+    
+    FragColor = vec4(result, layerColor.a);
 }
 )";
-
-
 
 
 
@@ -1607,6 +1782,8 @@ void main() {
     // Domain boundary conditions (closed box)
     vec3 vel = velocity[index].xyz;
     
+
+    // do not interact with the grid boundary
     //// X boundaries
     //if (gid.x == 0) vel.x = max(vel.x, 0.0);
     //if (gid.x == gridRes.x - 1) vel.x = min(vel.x, 0.0);
@@ -1640,6 +1817,8 @@ void main()
 
 
 
+
+
 const char* volumeFragSource = R"(
 #version 430 core
 out vec4 FragColor;
@@ -1661,25 +1840,19 @@ uniform float temperatureThreshold;
 uniform float stepSize;
 uniform int maxSteps;
 
-// ============================================================================
-// POINT LIGHT UNIFORMS (for shadow cubemaps)
-// ============================================================================
 #define MAX_POINT_LIGHTS 8
-
-uniform int numPointLights;
-uniform vec3 lightPositions[MAX_POINT_LIGHTS];
-uniform float lightIntensities[MAX_POINT_LIGHTS];
-uniform vec3 lightColors[MAX_POINT_LIGHTS];
-uniform float lightFarPlanes[MAX_POINT_LIGHTS];
-uniform int lightEnabled[MAX_POINT_LIGHTS];
-
-uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
-
-// ============================================================================
-// ADDITIONAL LIGHT STRUCTURES (for phase function)
-// ============================================================================
 #define MAX_SPOT_LIGHTS 8
 #define MAX_DIR_LIGHTS 4
+
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
 
 struct SpotLight {
     vec3 position;
@@ -1701,95 +1874,64 @@ struct DirLight {
     bool enabled;
 };
 
+uniform PointLight pointLights[MAX_POINT_LIGHTS];
 uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
 uniform DirLight dirLights[MAX_DIR_LIGHTS];
 
+uniform int numPointLights;
 uniform int numSpotLights;
 uniform int numDirLights;
 
-// ============================================================================
-// VOLUME LIGHTING PARAMETERS
-// ============================================================================
 uniform float volumeAbsorption;
 uniform float volumeScattering;
 uniform int shadowSamples;
-uniform float shadowDensityScale;
-uniform float phaseG;              // Phase function asymmetry: -1 to 1
+uniform float shadowDensityScale;  // NEW: separate density multiplier for shadows
+uniform float phaseG;
 uniform bool enableVolumeShadows;
 uniform bool enableVolumeLighting;
 uniform vec3 ambientLight;
 
-// ============================================================================
-// HENYEY-GREENSTEIN PHASE FUNCTION
-// ============================================================================
 float phaseHG(float cosTheta, float g) {
-    if (abs(g) < 0.001) return 1.0;  // Isotropic scattering
+    if (abs(g) < 0.001) return 1.0;
     float g2 = g * g;
     float denom = 1.0 + g2 - 2.0 * g * cosTheta;
     return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
 }
 
-// ============================================================================
-// SHADOW CUBEMAP SAMPLING (for solid geometry shadows)
-// ============================================================================
-float sampleVolumeShadow(int lightIndex, vec3 worldPos) {
-    vec3 fragToLight = worldPos - lightPositions[lightIndex];
-    float currentDepth = length(fragToLight);
-    float farPlane = lightFarPlanes[lightIndex];
-    
-    float closestDepth;
-    if (lightIndex == 0) closestDepth = texture(shadowMaps[0], fragToLight).r;
-    else if (lightIndex == 1) closestDepth = texture(shadowMaps[1], fragToLight).r;
-    else if (lightIndex == 2) closestDepth = texture(shadowMaps[2], fragToLight).r;
-    else if (lightIndex == 3) closestDepth = texture(shadowMaps[3], fragToLight).r;
-    else if (lightIndex == 4) closestDepth = texture(shadowMaps[4], fragToLight).r;
-    else if (lightIndex == 5) closestDepth = texture(shadowMaps[5], fragToLight).r;
-    else if (lightIndex == 6) closestDepth = texture(shadowMaps[6], fragToLight).r;
-    else closestDepth = texture(shadowMaps[7], fragToLight).r;
-    
-    closestDepth *= farPlane;
-    
-    // Soft bias for volumes
-    float bias = 0.5;
-    
-    return (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
+float sampleDensity(vec3 worldPos) {
+    vec3 uvw = (worldPos - gridMin) / (gridMax - gridMin);
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+        return 0.0;
+    }
+    float obs = texture(obstacleTex, uvw).r;
+    if (obs > 0.5) return 0.0;
+    return texture(densityTex, uvw).r;
 }
 
-// ============================================================================
-// VOLUMETRIC SELF-SHADOWING (light marching through smoke)
-// ============================================================================
-float marchLightShadow(vec3 samplePos, vec3 lightDir, float lightDist, int shadowSteps) {
+// Fixed shadow ray marching
+float lightTransmittance(vec3 pos, vec3 lightDir, float maxDist) {
     if (!enableVolumeShadows) return 1.0;
     
-    float shadowStepSize = min(lightDist, 10.0) / float(shadowSteps);
-    float shadowDensity = 0.0;
-    vec3 pos = samplePos;
+    // Use smaller steps for shadows to catch detail
+    float shadowStep = stepSize * 0.5;  // Half the view ray step size
+    float opticalDepth = 0.0;
     
-    for (int i = 0; i < shadowSteps; i++) {
-        pos += lightDir * shadowStepSize;
+    // March toward the light
+    for (int i = 0; i < shadowSamples; i++) {
+        float t = shadowStep * float(i + 1);
+        if (t >= maxDist) break;
         
-        // Check if still in volume bounds
-        vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
-        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
-            break;
-        }
+        vec3 samplePos = pos + lightDir * t;
+        float density = sampleDensity(samplePos);
         
-        // Check for obstacle (solid geometry blocks all light)
-        if (texture(obstacleTex, uvw).r > 0.5) {
-            return 0.0;
-        }
-        
-        // Accumulate density along light ray
-        shadowDensity += texture(densityTex, uvw).r * shadowStepSize * shadowDensityScale;
+        // Accumulate optical depth
+        opticalDepth += density * shadowStep * shadowDensityScale;
     }
     
-    // Exponential falloff based on accumulated density
-    return exp(-shadowDensity);
+    // Convert optical depth to transmittance
+    return exp(-opticalDepth);
 }
 
-// ============================================================================
-// DISTANCE TO VOLUME BOUNDARY
-// ============================================================================
 float distToBoundary(vec3 pos, vec3 dir) {
     vec3 invDir = 1.0 / (dir + vec3(0.0001));
     vec3 t0 = (gridMin - pos) * invDir;
@@ -1798,20 +1940,13 @@ float distToBoundary(vec3 pos, vec3 dir) {
     return max(0.0, min(min(tmax.x, tmax.y), tmax.z));
 }
 
-// ============================================================================
-// HEAT COLOR (for temperature visualization)
-// ============================================================================
 vec3 heatColor(float t) {
     return 5.0 * mix(mix(vec3(0.0), vec3(1.0, 0.0, 0.0), t),
                mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), t*t), smoothstep(0.5, 1.0, t));
 }
 
-// ============================================================================
-// MAIN RAY MARCHING LOOP
-// ============================================================================
 void main()
 {
-    // Reconstruct ray from screen coordinates
     vec4 near = vec4(vTexCoord * 2.0 - 1.0, -1.0, 1.0);
     vec4 far  = vec4(vTexCoord * 2.0 - 1.0,  1.0, 1.0);
     vec4 nearWorld = invViewProj * near;
@@ -1822,7 +1957,6 @@ void main()
     vec3 rayOrigin = nearWorld.xyz;
     vec3 rayDir = normalize(farWorld.xyz - nearWorld.xyz);
 
-    // Bounding box intersection
     vec3 invDir = 1.0 / rayDir;
     vec3 t0 = (gridMin - rayOrigin) * invDir;
     vec3 t1 = (gridMax - rayOrigin) * invDir;
@@ -1846,7 +1980,6 @@ void main()
     {
         vec3 uvw = (pos - gridMin) / (gridMax - gridMin);
 
-        // Check for obstacle
         float obs = texture(obstacleTex, uvw).r;
         if (obs > 0.5) break;
 
@@ -1858,67 +1991,48 @@ void main()
 
         if (sampleValue > 0.01)
         {
-            // Base color
             vec3 baseColor = visualizeTemperature ?
                 heatColor(sampleValue * 0.1) : vec3(0.9, 0.9, 0.95);
 
             vec3 lightContrib = vec3(0.0);
             
             if (enableVolumeLighting) {
-                // Ambient contribution
                 lightContrib = ambientLight * baseColor;
                 
-                // ============================================================
-                // DIRECTIONAL LIGHTS with Phase Function
-                // ============================================================
+                // Directional lights
                 for (int d = 0; d < MAX_DIR_LIGHTS; d++) {
                     if (!dirLights[d].enabled) continue;
                     
                     vec3 lightDir = normalize(-dirLights[d].direction);
                     float maxDist = distToBoundary(pos, lightDir);
+                    float lightTrans = lightTransmittance(pos, lightDir, maxDist);
                     
-                    // Volumetric self-shadowing
-                    float volumeShadow = marchLightShadow(pos, lightDir, maxDist, shadowSamples);
-                    
-                    // Phase function for scattering highlights
                     float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
-                    
                     lightContrib += dirLights[d].color * dirLights[d].intensity * 
-                                   phase * volumeShadow * volumeScattering * baseColor;
+                                   phase * lightTrans * volumeScattering * baseColor;
                 }
                 
-                // ============================================================
-                // POINT LIGHTS with Phase Function + Shadow Maps
-                // ============================================================
-                for (int p = 0; p < numPointLights && p < MAX_POINT_LIGHTS; p++) {
-                    if (lightEnabled[p] == 0) continue;
+                // Point lights
+                for (int p = 0; p < MAX_POINT_LIGHTS; p++) {
+                    if (!pointLights[p].enabled) continue;
                     
-                    vec3 toLight = lightPositions[p] - pos;
+                    vec3 toLight = pointLights[p].position - pos;
                     float dist = length(toLight);
                     vec3 lightDir = toLight / dist;
                     
-                    // Attenuation (inverse square)
-                    float attenuation = lightIntensities[p] / (dist * dist + 1.0);
+                    float attenuation = pointLights[p].intensity / 
+                        (pointLights[p].constant + 
+                         pointLights[p].linear * dist + 
+                         pointLights[p].quadratic * dist * dist);
                     
-                    // Shadow from solid geometry (shadow cubemaps)
-                    float solidShadow = sampleVolumeShadow(p, pos);
-                    
-                    // Volumetric self-shadowing (light marching through smoke)
-                    float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
-                    
-                    // Combined shadow factor
-                    float shadow = solidShadow * volumeShadow;
-                    
-                    // Phase function for scattering highlights
+                    float lightTrans = lightTransmittance(pos, lightDir, dist);
                     float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
                     
-                    lightContrib += lightColors[p] * attenuation * shadow * 
-                                   phase * volumeScattering * baseColor;
+                    lightContrib += pointLights[p].color * attenuation * 
+                                   phase * lightTrans * volumeScattering * baseColor;
                 }
                 
-                // ============================================================
-                // SPOT LIGHTS with Phase Function
-                // ============================================================
+                // Spot lights
                 for (int s = 0; s < MAX_SPOT_LIGHTS; s++) {
                     if (!spotLights[s].enabled) continue;
                     
@@ -1926,7 +2040,6 @@ void main()
                     float dist = length(toLight);
                     vec3 lightDir = toLight / dist;
                     
-                    // Spot cone check
                     float theta = dot(lightDir, normalize(-spotLights[s].direction));
                     float epsilon = spotLights[s].cutOff - spotLights[s].outerCutOff;
                     float spotEffect = clamp((theta - spotLights[s].outerCutOff) / epsilon, 0.0, 1.0);
@@ -1937,30 +2050,23 @@ void main()
                              spotLights[s].linear * dist + 
                              spotLights[s].quadratic * dist * dist);
                         
-                        // Volumetric self-shadowing
-                        float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
-                        
-                        // Phase function for scattering highlights
+                        float lightTrans = lightTransmittance(pos, lightDir, dist);
                         float phase = phaseHG(dot(-rayDir, lightDir), phaseG);
                         
                         lightContrib += spotLights[s].color * attenuation * spotEffect *
-                                       phase * volumeShadow * volumeScattering * baseColor;
+                                       phase * lightTrans * volumeScattering * baseColor;
                     }
                 }
             } else {
-                // No lighting - just use base color
                 lightContrib = baseColor;
             }
 
-            // Beer-Lambert absorption
             float absorption = volumeAbsorption * sampleValue * stepSize;
             float sampleTrans = exp(-absorption);
             
-            // Accumulate with front-to-back compositing
             accumulatedColor += transmittance * (1.0 - sampleTrans) * lightContrib;
             transmittance *= sampleTrans;
 
-            // Early termination when nearly opaque
             if (transmittance < 0.01) break;
         }
 
@@ -1968,7 +2074,6 @@ void main()
         pos = rayOrigin + rayDir * t;
     }
 
-    // Blend with background
     vec3 backgroundColor = vec3(0.1, 0.15, 0.2);
     accumulatedColor += transmittance * backgroundColor;
     
@@ -1981,28 +2086,26 @@ void main()
 
 
 
-
-
-
+// Common vertex shader for all primitives
 const char* commonVertexShaderSource = R"(
 #version 430 core
 layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 color;
-layout(location = 2) in vec3 normal;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 color;
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
-out vec3 fragColor;
-out vec3 fragNormal;
-out vec3 fragWorldPos;
+out vec3 FragPos;
+out vec3 Normal;
+out vec3 Color;
 
 void main() {
     vec4 worldPos = model * vec4(position, 1.0);
-    fragWorldPos = worldPos.xyz;
-    fragColor = color;
-    fragNormal = mat3(transpose(inverse(model))) * normal;
+    FragPos = worldPos.xyz;
+    Normal = mat3(transpose(inverse(model))) * normal;
+    Color = color;
     gl_Position = projection * view * worldPos;
 }
 )";
@@ -2010,131 +2113,276 @@ void main() {
 
 
 
-
-
-// Common fragment shader for all primitives with point light shadows
 const char* commonFragmentShaderSource = R"(
 #version 430 core
 
-in vec3 fragColor;
-in vec3 fragNormal;
-in vec3 fragWorldPos;
+#define MAX_POINT_LIGHTS 8
+#define MAX_SPOT_LIGHTS 8
+#define MAX_DIR_LIGHTS 4
+
+in vec3 FragPos;
+in vec3 Normal;
+in vec3 Color;
 
 out vec4 finalColor;
 
-// Maximum number of point lights (adjust as needed)
-#define MAX_POINT_LIGHTS 8
+// Light structures
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
 
-// Point light data
+struct SpotLight {
+    vec3 position;
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    float cutOff;
+    float outerCutOff;
+    float constant;
+    float linear;
+    float quadratic;
+    bool enabled;
+};
+
+struct DirLight {
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    bool enabled;
+};
+
+uniform PointLight pointLights[MAX_POINT_LIGHTS];
+uniform SpotLight spotLights[MAX_SPOT_LIGHTS];
+uniform DirLight dirLights[MAX_DIR_LIGHTS];
+
 uniform int numPointLights;
-uniform vec3 lightPositions[MAX_POINT_LIGHTS];
-uniform float lightIntensities[MAX_POINT_LIGHTS];
-uniform vec3 lightColors[MAX_POINT_LIGHTS];
-uniform float lightFarPlanes[MAX_POINT_LIGHTS];
-uniform int lightEnabled[MAX_POINT_LIGHTS];  // NEW: 1 = enabled, 0 = disabled
+uniform int numSpotLights;
+uniform int numDirLights;
 
-// Shadow cubemaps
-uniform samplerCube shadowMaps[MAX_POINT_LIGHTS];
-
-// Camera position for specular
 uniform vec3 viewPos;
-
-// Ambient light
-uniform vec3 ambientColor;
 uniform float ambientStrength;
+uniform float shininess;
 
-// Shadow bias to prevent acne
-const float SHADOW_BIAS = 0.5;
-const float MAX_SHADOW_BIAS = 0.1;
+// Shadow mapping uniforms
+uniform bool enableShadows;
+uniform float shadowBias;
+uniform float shadowIntensity;
+uniform int pcfSamples;
 
-// Sample shadow cubemap with PCF (Percentage Closer Filtering)
-float calculateShadow(int lightIndex, vec3 fragToLight, float currentDepth, float farPlane) {
-    // Sample directions for PCF
-    vec3 sampleOffsetDirections[20] = vec3[](
-        vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1),
-        vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1),
-        vec3( 1,  1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1,  1,  0),
-        vec3( 1,  0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1,  0, -1),
-        vec3( 0,  1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0,  1, -1)
-    );
+// Shadow maps for directional lights (2D textures)
+uniform sampler2D dirShadowMaps[MAX_DIR_LIGHTS];
+uniform mat4 dirLightSpaceMatrices[MAX_DIR_LIGHTS];
+
+// Shadow maps for spot lights (2D textures)
+uniform sampler2D spotShadowMaps[MAX_SPOT_LIGHTS];
+uniform mat4 spotLightSpaceMatrices[MAX_SPOT_LIGHTS];
+
+// Shadow cube maps for point lights
+uniform samplerCube pointShadowMaps[MAX_POINT_LIGHTS];
+uniform float pointLightFarPlanes[MAX_POINT_LIGHTS];
+
+// PCF offsets for smoother shadows
+vec3 sampleOffsetDirections[20] = vec3[](
+    vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1),
+    vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1),
+    vec3( 1,  1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1,  1,  0),
+    vec3( 1,  0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1,  0, -1),
+    vec3( 0,  1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0,  1, -1)
+);
+
+// Calculate shadow for directional/spot lights (2D shadow map)
+float CalcShadow2D(sampler2D shadowMap, mat4 lightSpaceMatrix, vec3 normal, vec3 lightDir) {
+    if (!enableShadows) return 0.0;
     
+    vec4 fragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+    
+    // Check if outside shadow map
+    if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
+        projCoords.y < 0.0 || projCoords.y > 1.0) {
+        return 0.0;
+    }
+    
+    float currentDepth = projCoords.z;
+    
+    // Calculate bias based on surface angle
+    float bias = max(shadowBias * (1.0 - dot(normal, lightDir)), shadowBias * 0.1);
+    
+    // PCF (Percentage Closer Filtering)
     float shadow = 0.0;
-    float samples = 20.0;
-    float diskRadius = 0.02;
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
     
-    // Dynamic bias based on surface angle
-    vec3 normal = normalize(fragNormal);
-    vec3 lightDir = normalize(-fragToLight);
-    float bias = max(MAX_SHADOW_BIAS * (1.0 - dot(normal, lightDir)), SHADOW_BIAS);
+    for (int x = -pcfSamples; x <= pcfSamples; ++x) {
+        for (int y = -pcfSamples; y <= pcfSamples; ++y) {
+            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+        }
+    }
+    
+    int sampleCount = (2 * pcfSamples + 1) * (2 * pcfSamples + 1);
+    shadow /= float(sampleCount);
+    
+    return shadow * (1.0 - shadowIntensity);
+}
+
+// Calculate shadow for point lights (cube shadow map)
+float CalcPointShadow(int lightIndex, vec3 lightPos, float farPlane) {
+    if (!enableShadows) return 0.0;
+    
+    vec3 fragToLight = FragPos - lightPos;
+    float currentDepth = length(fragToLight);
+    
+    // PCF for cube maps
+    float shadow = 0.0;
+    float diskRadius = (1.0 + (length(viewPos - FragPos) / farPlane)) / 25.0;
     
     for (int i = 0; i < 20; ++i) {
         float closestDepth;
         
-        // Sample the appropriate shadow map based on light index
-        if (lightIndex == 0) closestDepth = texture(shadowMaps[0], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else if (lightIndex == 1) closestDepth = texture(shadowMaps[1], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else if (lightIndex == 2) closestDepth = texture(shadowMaps[2], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else if (lightIndex == 3) closestDepth = texture(shadowMaps[3], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else if (lightIndex == 4) closestDepth = texture(shadowMaps[4], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else if (lightIndex == 5) closestDepth = texture(shadowMaps[5], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else if (lightIndex == 6) closestDepth = texture(shadowMaps[6], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
-        else closestDepth = texture(shadowMaps[7], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        // Sample the correct cube map based on light index
+        if (lightIndex == 0) {
+            closestDepth = texture(pointShadowMaps[0], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else if (lightIndex == 1) {
+            closestDepth = texture(pointShadowMaps[1], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else if (lightIndex == 2) {
+            closestDepth = texture(pointShadowMaps[2], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else if (lightIndex == 3) {
+            closestDepth = texture(pointShadowMaps[3], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else if (lightIndex == 4) {
+            closestDepth = texture(pointShadowMaps[4], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else if (lightIndex == 5) {
+            closestDepth = texture(pointShadowMaps[5], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else if (lightIndex == 6) {
+            closestDepth = texture(pointShadowMaps[6], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        } else {
+            closestDepth = texture(pointShadowMaps[7], fragToLight + sampleOffsetDirections[i] * diskRadius).r;
+        }
         
         closestDepth *= farPlane;
         
-        if (currentDepth - bias > closestDepth) {
+        if (currentDepth - shadowBias > closestDepth) {
             shadow += 1.0;
         }
     }
-    shadow /= samples;
     
-    return shadow;
+    shadow /= 20.0;
+    return shadow * (1.0 - shadowIntensity);
+}
+
+// Calculate directional light contribution with shadows
+vec3 CalcDirLight(DirLight light, int lightIndex, vec3 normal, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(-light.direction);
+    
+    // Diffuse shading
+    float diff = max(dot(normal, lightDir), 0.0);
+    
+    // Specular shading (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    
+    // Calculate shadow
+    float shadow = CalcShadow2D(dirShadowMaps[lightIndex], dirLightSpaceMatrices[lightIndex], normal, lightDir);
+    
+    // Combine results
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.5;
+    
+    return (1.0 - shadow) * (diffuse + specular) * baseColor;
+}
+
+// Calculate point light contribution with shadows
+vec3 CalcPointLight(PointLight light, int lightIndex, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    
+    // Diffuse shading
+    float diff = max(dot(normal, lightDir), 0.0);
+    
+    // Specular shading (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    
+    // Attenuation
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    // Calculate shadow
+    float shadow = CalcPointShadow(lightIndex, light.position, pointLightFarPlanes[lightIndex]);
+    
+    // Combine results
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.5;
+    
+    return (1.0 - shadow) * (diffuse + specular) * attenuation * baseColor;
+}
+
+// Calculate spot light contribution with shadows
+vec3 CalcSpotLight(SpotLight light, int lightIndex, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 baseColor) {
+    if (!light.enabled) return vec3(0.0);
+    
+    vec3 lightDir = normalize(light.position - fragPos);
+    
+    // Diffuse shading
+    float diff = max(dot(normal, lightDir), 0.0);
+    
+    // Specular shading (Blinn-Phong)
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    
+    // Attenuation
+    float distance = length(light.position - fragPos);
+    float attenuation = 1.0 / (light.constant + light.linear * distance + 
+                               light.quadratic * (distance * distance));
+    
+    // Spotlight intensity (soft edges)
+    float theta = dot(lightDir, normalize(-light.direction));
+    float epsilon = light.cutOff - light.outerCutOff;
+    float spotIntensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+    
+    // Calculate shadow
+    float shadow = CalcShadow2D(spotShadowMaps[lightIndex], spotLightSpaceMatrices[lightIndex], normal, lightDir);
+    
+    // Combine results
+    vec3 diffuse = light.color * diff * light.intensity;
+    vec3 specular = light.color * spec * light.intensity * 0.5;
+    
+    return (1.0 - shadow) * (diffuse + specular) * attenuation * spotIntensity * baseColor;
 }
 
 void main() {
-
-
-    vec3 normal = normalize(fragNormal);
-
-
-//finalColor = vec4(normal, 1.0);
-//return;
-
-
-    vec3 viewDir = normalize(viewPos - fragWorldPos);
+    vec3 norm = normalize(Normal);
+    vec3 viewDir = normalize(viewPos - FragPos);
     
-    // Start with ambient light
-    vec3 result = ambientColor * ambientStrength * fragColor;
+    // Ambient component (not affected by shadows)
+    vec3 ambient = ambientStrength * Color;
     
-// Process each point light
-for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; ++i) {
-    // Skip disabled lights
-    if (lightEnabled[i] == 0) continue;
+    // Accumulate lighting from all sources
+    vec3 result = ambient;
     
-    vec3 lightDir = lightPositions[i] - fragWorldPos;
-
-        float distance = length(lightDir);
-        lightDir = normalize(lightDir);
-        
-        // Attenuation (inverse square law with intensity)
-        float attenuation = lightIntensities[i] / (distance * distance);
-        
-        // Diffuse
-        float diff = max(dot(normal, lightDir), 0.0);
-        vec3 diffuse = diff * lightColors[i] * attenuation;
-        
-        // Specular (Blinn-Phong)
-        vec3 halfwayDir = normalize(lightDir + viewDir);
-        float spec = pow(max(dot(normal, halfwayDir), 0.0), 32.0);
-        vec3 specular = spec * lightColors[i] * attenuation * 0.5;
-        
-        // Shadow calculation
-        vec3 fragToLight = fragWorldPos - lightPositions[i];
-        float currentDepth = length(fragToLight);
-        float shadow = calculateShadow(i, fragToLight, currentDepth, lightFarPlanes[i]);
-        
-        // Apply shadow (1.0 = fully lit, 0.0 = fully shadowed)
-        result += (1.0 - shadow) * (diffuse + specular) * fragColor;
+    // Directional lights with shadows
+    for (int i = 0; i < numDirLights && i < MAX_DIR_LIGHTS; i++) {
+        result += CalcDirLight(dirLights[i], i, norm, viewDir, Color);
+    }
+    
+    // Point lights with shadows
+    for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; i++) {
+        result += CalcPointLight(pointLights[i], i, norm, FragPos, viewDir, Color);
+    }
+    
+    // Spot lights with shadows
+    for (int i = 0; i < numSpotLights && i < MAX_SPOT_LIGHTS; i++) {
+        result += CalcSpotLight(spotLights[i], i, norm, FragPos, viewDir, Color);
     }
     
     finalColor = vec4(result, 1.0);
@@ -2145,33 +2393,67 @@ for (int i = 0; i < numPointLights && i < MAX_POINT_LIGHTS; ++i) {
 
 
 
-// Shadow map depth shader for point lights (renders to cubemap)
-const char* shadowMapVertexShader = R"(
+    // ============================================================================
+    // SHADOW MAPPING SHADERS
+    // ============================================================================
+
+    // Simple depth shader for directional and spot light shadow maps
+    const char* shadowDepthVertexShader = R"(
 #version 430 core
 layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 color;
 
+uniform mat4 lightSpaceMatrix;
 uniform mat4 model;
 
 void main() {
-    gl_Position = model * vec4(position, 1.0);
+    gl_Position = lightSpaceMatrix * model * vec4(position, 1.0);
 }
 )";
 
-const char* shadowMapGeometryShader = R"(
+    const char* shadowDepthFragmentShader = R"(
+#version 430 core
+
+void main() {
+    // gl_FragDepth is automatically written
+    // Empty fragment shader for depth-only pass
+}
+)";
+
+    // Point light shadow map shaders (render to cube map using geometry shader)
+    const char* pointShadowVertexShader = R"(
+#version 430 core
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 color;
+
+uniform mat4 model;
+
+out vec3 FragPos;
+
+void main() {
+    FragPos = vec3(model * vec4(position, 1.0));
+    gl_Position = vec4(FragPos, 1.0);
+}
+)";
+
+    const char* pointShadowGeometryShader = R"(
 #version 430 core
 layout(triangles) in;
 layout(triangle_strip, max_vertices = 18) out;
 
 uniform mat4 shadowMatrices[6];
 
-out vec4 FragPos;
+in vec3 FragPos[];
+out vec4 FragPosWorld;
 
 void main() {
     for (int face = 0; face < 6; ++face) {
-        gl_Layer = face;
+        gl_Layer = face;  // Select cube map face
         for (int i = 0; i < 3; ++i) {
-            FragPos = gl_in[i].gl_Position;
-            gl_Position = shadowMatrices[face] * FragPos;
+            FragPosWorld = vec4(FragPos[i], 1.0);
+            gl_Position = shadowMatrices[face] * FragPosWorld;
             EmitVertex();
         }
         EndPrimitive();
@@ -2179,28 +2461,25 @@ void main() {
 }
 )";
 
-const char* shadowMapFragmentShader = R"(
+    const char* pointShadowFragmentShader = R"(
 #version 430 core
-in vec4 FragPos;
+
+in vec4 FragPosWorld;
 
 uniform vec3 lightPos;
 uniform float farPlane;
 
 void main() {
-    // Get distance between fragment and light source
-    float lightDistance = length(FragPos.xyz - lightPos);
+    // Calculate distance from fragment to light
+    float lightDistance = length(FragPosWorld.xyz - lightPos);
     
-    // Map to [0, 1] range by dividing by far plane
+    // Map to [0, 1] range
     lightDistance = lightDistance / farPlane;
     
-    // Write as depth
+    // Write depth
     gl_FragDepth = lightDistance;
 }
 )";
-
-
-
-
 
 
 
@@ -2240,186 +2519,6 @@ GLuint compileComputeShader(const char* source) {
     glDeleteShader(shader);
     return program;
 }
-
-
-
-
-
-
-// ============================================================================
-// Shadow Map Shader Compilation
-// ============================================================================
-
-GLuint createShadowMapProgram() {
-    GLuint vertShader = compileShader(GL_VERTEX_SHADER, shadowMapVertexShader);
-    GLuint geomShader = compileShader(GL_GEOMETRY_SHADER, shadowMapGeometryShader);
-    GLuint fragShader = compileShader(GL_FRAGMENT_SHADER, shadowMapFragmentShader);
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, vertShader);
-    glAttachShader(program, geomShader);
-    glAttachShader(program, fragShader);
-    glLinkProgram(program);
-
-    GLint success;
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char infoLog[512];
-        glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        cerr << "Shadow map program linking failed:\n" << infoLog << endl;
-        return 0;
-    }
-
-    glDeleteShader(vertShader);
-    glDeleteShader(geomShader);
-    glDeleteShader(fragShader);
-
-    return program;
-}
-
-// ============================================================================
-// Point Light Management
-// ============================================================================
-
-void addPointLight(const glm::vec3& pos, float intensity, const glm::vec3& color) {
-    PointLight light;
-    light.position = pos;
-    light.intensity = intensity;
-    light.color = color;
-    light.nearPlane = 0.1f;
-    light.farPlane = 100.0f;
-
-    // Create depth cubemap
-    glGenTextures(1, &light.depthCubemap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, light.depthCubemap);
-    for (int i = 0; i < 6; ++i) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_DEPTH_COMPONENT,
-            SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-
-    // Create framebuffer
-    glGenFramebuffers(1, &light.shadowFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, light.shadowFBO);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, light.depthCubemap, 0);
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        cerr << "Shadow map framebuffer not complete!" << endl;
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    pointLights.push_back(light);
-    cout << "Added point light at (" << pos.x << ", " << pos.y << ", " << pos.z
-        << ") with intensity " << intensity << endl;
-}
-
-void initShadowMaps() {
-    cout << "Initializing shadow maps..." << endl;
-
-    // Compile shadow map shader program
-    shadowMapProgram = createShadowMapProgram();
-    if (!shadowMapProgram) {
-        cerr << "Failed to create shadow map program!" << endl;
-        return;
-    }
-
-    // Add default point light
-    addPointLight(glm::vec3(20.0f, 20.0f, 20.0f), 500.0f, glm::vec3(1.0f, 1.0f, 1.0f));
-
-    cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
-}
-
-void renderShadowMaps() {
-    if (!shadowMapProgram || pointLights.empty()) return;
-
-    glUseProgram(shadowMapProgram);
-    glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
-
-    // For each point light, render the scene to its shadow cubemap
-    for (size_t lightIdx = 0; lightIdx < pointLights.size(); ++lightIdx) {
-        PointLight& light = pointLights[lightIdx];
-
-        // Skip disabled lights - no need to render their shadow maps
-        if (!light.enabled) continue;
-
-        glBindFramebuffer(GL_FRAMEBUFFER, light.shadowFBO);
-        glClear(GL_DEPTH_BUFFER_BIT);
-
-        // Create shadow projection matrix (90 degree FOV for cubemap)
-        float aspect = 1.0f;
-        glm::mat4 shadowProj = glm::perspective(glm::radians(90.0f), aspect,
-            light.nearPlane, light.farPlane);
-
-        // Create view matrices for each cubemap face
-        glm::mat4 shadowTransforms[6];
-        shadowTransforms[0] = shadowProj * glm::lookAt(light.position,
-            light.position + glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f));
-        shadowTransforms[1] = shadowProj * glm::lookAt(light.position,
-            light.position + glm::vec3(-1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f));
-        shadowTransforms[2] = shadowProj * glm::lookAt(light.position,
-            light.position + glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        shadowTransforms[3] = shadowProj * glm::lookAt(light.position,
-            light.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
-        shadowTransforms[4] = shadowProj * glm::lookAt(light.position,
-            light.position + glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
-        shadowTransforms[5] = shadowProj * glm::lookAt(light.position,
-            light.position + glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
-
-        // Set uniforms
-        for (int i = 0; i < 6; ++i) {
-            glUniformMatrix4fv(glGetUniformLocation(shadowMapProgram,
-                ("shadowMatrices[" + std::to_string(i) + "]").c_str()),
-                1, GL_FALSE, glm::value_ptr(shadowTransforms[i]));
-        }
-        glUniform3fv(glGetUniformLocation(shadowMapProgram, "lightPos"), 1, glm::value_ptr(light.position));
-        glUniform1f(glGetUniformLocation(shadowMapProgram, "farPlane"), light.farPlane);
-
-        // Render voxel objects (shadow casters) - NOT marching cubes
-        glm::mat4 identity(1.0f);
-        glUniformMatrix4fv(glGetUniformLocation(shadowMapProgram, "model"), 1, GL_FALSE, glm::value_ptr(identity));
-
-        // Draw triangles (voxel mesh) - these cast shadows
-        if (numTriangleIndices > 0) {
-            glBindVertexArray(triangleVAO);
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
-            glBindVertexArray(0);
-        }
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    // Restore viewport
-    glViewport(0, 0, win_x, win_y);
-}
-
-void cleanupShadowMaps() {
-    if (shadowMapProgram) {
-        glDeleteProgram(shadowMapProgram);
-        shadowMapProgram = 0;
-    }
-
-    for (auto& light : pointLights) {
-        if (light.shadowFBO) glDeleteFramebuffers(1, &light.shadowFBO);
-        if (light.depthCubemap) glDeleteTextures(1, &light.depthCubemap);
-    }
-    pointLights.clear();
-}
-
-
-
-
-
-
-
-
-
 
 // ============================================================================
 // GPU Initialization
@@ -2537,6 +2636,400 @@ void initGPUBuffers(std::vector<voxel_object>& objects) {
     gpuInitialized = true;
     cout << "GPU buffers initialized successfully for " << objects.size() << " voxel objects" << endl;
 }
+
+
+
+
+// ============================================================================
+// SHADOW MAP INITIALIZATION
+// ============================================================================
+
+void initShadowMaps() {
+    // Compile shadow depth shaders
+    GLuint depthVS = compileShader(GL_VERTEX_SHADER, shadowDepthVertexShader);
+    GLuint depthFS = compileShader(GL_FRAGMENT_SHADER, shadowDepthFragmentShader);
+
+    shadowDepthProgram = glCreateProgram();
+    glAttachShader(shadowDepthProgram, depthVS);
+    glAttachShader(shadowDepthProgram, depthFS);
+    glLinkProgram(shadowDepthProgram);
+
+    GLint success;
+    glGetProgramiv(shadowDepthProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(shadowDepthProgram, 512, nullptr, infoLog);
+        cerr << "Shadow depth program linking failed:\n" << infoLog << endl;
+    }
+
+    glDeleteShader(depthVS);
+    glDeleteShader(depthFS);
+
+    // Compile point shadow shaders (with geometry shader)
+    GLuint pointVS = compileShader(GL_VERTEX_SHADER, pointShadowVertexShader);
+    GLuint pointGS = compileShader(GL_GEOMETRY_SHADER, pointShadowGeometryShader);
+    GLuint pointFS = compileShader(GL_FRAGMENT_SHADER, pointShadowFragmentShader);
+
+    pointShadowDepthProgram = glCreateProgram();
+    glAttachShader(pointShadowDepthProgram, pointVS);
+    glAttachShader(pointShadowDepthProgram, pointGS);
+    glAttachShader(pointShadowDepthProgram, pointFS);
+    glLinkProgram(pointShadowDepthProgram);
+
+    glGetProgramiv(pointShadowDepthProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(pointShadowDepthProgram, 512, nullptr, infoLog);
+        cerr << "Point shadow program linking failed:\n" << infoLog << endl;
+    }
+
+    glDeleteShader(pointVS);
+    glDeleteShader(pointGS);
+    glDeleteShader(pointFS);
+
+    // Create shadow maps for directional lights
+    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
+        // Create depth texture
+        glGenTextures(1, &dirLightShadowMaps[i]);
+        glBindTexture(GL_TEXTURE_2D, dirLightShadowMaps[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F,
+            SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0,
+            GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+
+        // Create FBO
+        glGenFramebuffers(1, &dirLightShadowFBOs[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, dirLightShadowFBOs[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, dirLightShadowMaps[i], 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            cerr << "Directional shadow FBO " << i << " is not complete!" << endl;
+        }
+    }
+
+    // Create shadow maps for spot lights
+    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
+        glGenTextures(1, &spotLightShadowMaps[i]);
+        glBindTexture(GL_TEXTURE_2D, spotLightShadowMaps[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F,
+            SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0,
+            GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+
+        glGenFramebuffers(1, &spotLightShadowFBOs[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, spotLightShadowFBOs[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, spotLightShadowMaps[i], 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            cerr << "Spot shadow FBO " << i << " is not complete!" << endl;
+        }
+    }
+
+    // Create cube shadow maps for point lights
+    for (int i = 0; i < MAX_POINT_LIGHTS; i++) {
+        pointLightFarPlanes[i] = 100.0f;  // Default far plane
+
+        glGenTextures(1, &pointLightShadowCubeMaps[i]);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, pointLightShadowCubeMaps[i]);
+
+        for (int face = 0; face < 6; face++) {
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT32F,
+                POINT_SHADOW_MAP_SIZE, POINT_SHADOW_MAP_SIZE, 0,
+                GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        }
+
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+        glGenFramebuffers(1, &pointLightShadowFBOs[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, pointLightShadowFBOs[i]);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, pointLightShadowCubeMaps[i], 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            cerr << "Point shadow FBO " << i << " is not complete!" << endl;
+        }
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    cout << "Shadow maps initialized successfully!" << endl;
+}
+
+
+// ============================================================================
+// SHADOW MAP RENDERING FUNCTIONS
+// ============================================================================
+
+// Render scene geometry for shadow pass (no colors, just depth)
+void renderSceneForShadows(GLuint shaderProgram) {
+    // Only render voxel meshes - NOT fluid/marching cubes
+    if (numTriangleIndices == 0) return;
+
+    glBindVertexArray(triangleVAO);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+}
+
+// Render shadow map for a directional light
+void renderDirLightShadowMap(int lightIndex) {
+    if (!dirLights[lightIndex].enabled || !shadowParams.enableShadows) return;
+
+    // Calculate light space matrix for directional light
+    // Use orthographic projection for directional lights
+    float orthoSize = 30.0f;  // Adjust based on your scene size
+    glm::mat4 lightProjection = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, 0.1f, 100.0f);
+
+    // Light "position" - offset in opposite direction of light
+    glm::vec3 lightDir = glm::normalize(dirLights[lightIndex].direction);
+    glm::vec3 lightPos = -lightDir * 30.0f;  // Place light far along its direction
+
+    glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    dirLightSpaceMatrices[lightIndex] = lightProjection * lightView;
+
+    // Render to shadow map
+    glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    glBindFramebuffer(GL_FRAMEBUFFER, dirLightShadowFBOs[lightIndex]);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(shadowDepthProgram);
+    glUniformMatrix4fv(glGetUniformLocation(shadowDepthProgram, "lightSpaceMatrix"), 1, GL_FALSE,
+        glm::value_ptr(dirLightSpaceMatrices[lightIndex]));
+
+    glm::mat4 model = glm::mat4(1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(shadowDepthProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+
+    // Render shadow casters
+    glEnable(GL_DEPTH_TEST);
+
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);  // slope factor, constant bias
+
+    renderSceneForShadows(shadowDepthProgram);
+
+    glDisable(GL_POLYGON_OFFSET_FILL);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// Render shadow map for a spot light
+void renderSpotLightShadowMap(int lightIndex) {
+    if (!spotLights[lightIndex].enabled || !shadowParams.enableShadows) return;
+
+    // Use perspective projection for spot lights
+    float fov = glm::acos(spotLights[lightIndex].outerCutOff) * 2.0f;
+    glm::mat4 lightProjection = glm::perspective(fov, 1.0f, 0.1f, 50.0f);
+
+    glm::vec3 lightPos = spotLights[lightIndex].position;
+    glm::vec3 lightDir = glm::normalize(spotLights[lightIndex].direction);
+    glm::vec3 lightTarget = lightPos + lightDir;
+
+    // Calculate up vector
+    glm::vec3 right = glm::normalize(glm::cross(lightDir, glm::vec3(0.0f, 1.0f, 0.0f)));
+    glm::vec3 up = glm::normalize(glm::cross(right, lightDir));
+
+    glm::mat4 lightView = glm::lookAt(lightPos, lightTarget, up);
+    spotLightSpaceMatrices[lightIndex] = lightProjection * lightView;
+
+    // Render to shadow map
+    glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    glBindFramebuffer(GL_FRAMEBUFFER, spotLightShadowFBOs[lightIndex]);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(shadowDepthProgram);
+    glUniformMatrix4fv(glGetUniformLocation(shadowDepthProgram, "lightSpaceMatrix"), 1, GL_FALSE,
+        glm::value_ptr(spotLightSpaceMatrices[lightIndex]));
+
+    glm::mat4 model = glm::mat4(1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(shadowDepthProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);  // slope factor, constant bias
+
+    renderSceneForShadows(shadowDepthProgram);
+
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// Render shadow cube map for a point light
+void renderPointLightShadowMap(int lightIndex) {
+    if (!pointLights[lightIndex].enabled || !shadowParams.enableShadows) return;
+
+    glm::vec3 lightPos = pointLights[lightIndex].position;
+    float farPlane = pointLightFarPlanes[lightIndex];
+    float nearPlane = 0.1f;
+
+    glm::mat4 shadowProj = glm::perspective(glm::radians(90.0f), 1.0f, nearPlane, farPlane);
+
+    // Create view matrices for each cube face
+    int baseIndex = lightIndex * 6;
+    pointLightShadowMatrices[baseIndex + 0] = shadowProj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+    pointLightShadowMatrices[baseIndex + 1] = shadowProj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(-1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+    pointLightShadowMatrices[baseIndex + 2] = shadowProj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    pointLightShadowMatrices[baseIndex + 3] = shadowProj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+    pointLightShadowMatrices[baseIndex + 4] = shadowProj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+    pointLightShadowMatrices[baseIndex + 5] = shadowProj *
+        glm::lookAt(lightPos, lightPos + glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
+
+    // Render to cube map
+    glViewport(0, 0, POINT_SHADOW_MAP_SIZE, POINT_SHADOW_MAP_SIZE);
+    glBindFramebuffer(GL_FRAMEBUFFER, pointLightShadowFBOs[lightIndex]);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(pointShadowDepthProgram);
+
+    // Set shadow matrices
+    for (int i = 0; i < 6; i++) {
+        std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
+        glUniformMatrix4fv(glGetUniformLocation(pointShadowDepthProgram, uniformName.c_str()),
+            1, GL_FALSE, glm::value_ptr(pointLightShadowMatrices[baseIndex + i]));
+    }
+
+    glUniform3fv(glGetUniformLocation(pointShadowDepthProgram, "lightPos"), 1, glm::value_ptr(lightPos));
+    glUniform1f(glGetUniformLocation(pointShadowDepthProgram, "farPlane"), farPlane);
+
+    glm::mat4 model = glm::mat4(1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(pointShadowDepthProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+
+    glEnable(GL_DEPTH_TEST);
+
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);  // slope factor, constant bias
+
+    renderSceneForShadows(pointShadowDepthProgram);
+
+    glDisable(GL_POLYGON_OFFSET_FILL);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// Render all shadow maps
+void renderShadowMaps() {
+    if (!shadowParams.enableShadows) return;
+
+    // Store current viewport
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+
+    // Render directional light shadows
+    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
+        renderDirLightShadowMap(i);
+    }
+
+    // Render spot light shadows
+    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
+        renderSpotLightShadowMap(i);
+    }
+
+    // Render point light shadows
+    for (int i = 0; i < MAX_POINT_LIGHTS; i++) {
+        renderPointLightShadowMap(i);
+    }
+
+    // Restore viewport
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+}
+
+// ============================================================================
+// SET SHADOW UNIFORMS FOR A SHADER PROGRAM
+// ============================================================================
+
+void setShadowUniforms(GLuint program) {
+    glUseProgram(program);
+
+    // Set shadow parameters
+    glUniform1i(glGetUniformLocation(program, "enableShadows"), shadowParams.enableShadows ? 1 : 0);
+    glUniform1f(glGetUniformLocation(program, "shadowBias"), shadowParams.bias);
+    glUniform1f(glGetUniformLocation(program, "shadowIntensity"), shadowParams.shadowIntensity);
+    glUniform1i(glGetUniformLocation(program, "pcfSamples"), shadowParams.pcfSamples);
+
+    // Bind directional light shadow maps and matrices
+    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
+        // Shadow map texture
+        glActiveTexture(GL_TEXTURE10 + i);  // Start at texture unit 10
+        glBindTexture(GL_TEXTURE_2D, dirLightShadowMaps[i]);
+
+        std::string texUniform = "dirShadowMaps[" + std::to_string(i) + "]";
+        glUniform1i(glGetUniformLocation(program, texUniform.c_str()), 10 + i);
+
+        // Light space matrix
+        std::string matUniform = "dirLightSpaceMatrices[" + std::to_string(i) + "]";
+        glUniformMatrix4fv(glGetUniformLocation(program, matUniform.c_str()), 1, GL_FALSE,
+            glm::value_ptr(dirLightSpaceMatrices[i]));
+    }
+
+    // Bind spot light shadow maps and matrices
+    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
+        glActiveTexture(GL_TEXTURE18 + i);  // Start at texture unit 18
+        glBindTexture(GL_TEXTURE_2D, spotLightShadowMaps[i]);
+
+        std::string texUniform = "spotShadowMaps[" + std::to_string(i) + "]";
+        glUniform1i(glGetUniformLocation(program, texUniform.c_str()), 18 + i);
+
+        std::string matUniform = "spotLightSpaceMatrices[" + std::to_string(i) + "]";
+        glUniformMatrix4fv(glGetUniformLocation(program, matUniform.c_str()), 1, GL_FALSE,
+            glm::value_ptr(spotLightSpaceMatrices[i]));
+    }
+
+    // Bind point light shadow cube maps and far planes
+    for (int i = 0; i < MAX_POINT_LIGHTS; i++) {
+        glActiveTexture(GL_TEXTURE26 + i);  // Start at texture unit 26
+        glBindTexture(GL_TEXTURE_CUBE_MAP, pointLightShadowCubeMaps[i]);
+
+        std::string texUniform = "pointShadowMaps[" + std::to_string(i) + "]";
+        glUniform1i(glGetUniformLocation(program, texUniform.c_str()), 26 + i);
+
+        std::string farUniform = "pointLightFarPlanes[" + std::to_string(i) + "]";
+        glUniform1f(glGetUniformLocation(program, farUniform.c_str()), pointLightFarPlanes[i]);
+    }
+}
+
+
+// ============================================================================
+// SHADOW MAP CLEANUP
+// ============================================================================
+
+void cleanupShadowMaps() {
+    if (shadowDepthProgram) glDeleteProgram(shadowDepthProgram);
+    if (pointShadowDepthProgram) glDeleteProgram(pointShadowDepthProgram);
+
+    glDeleteTextures(MAX_DIR_LIGHTS, dirLightShadowMaps);
+    glDeleteFramebuffers(MAX_DIR_LIGHTS, dirLightShadowFBOs);
+
+    glDeleteTextures(MAX_SPOT_LIGHTS, spotLightShadowMaps);
+    glDeleteFramebuffers(MAX_SPOT_LIGHTS, spotLightShadowFBOs);
+
+    glDeleteTextures(MAX_POINT_LIGHTS, pointLightShadowCubeMaps);
+    glDeleteFramebuffers(MAX_POINT_LIGHTS, pointLightShadowFBOs);
+}
+
 
 
 
@@ -3071,7 +3564,9 @@ void drawMarchingCubesMesh() {
     glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
     glUniformMatrix4fv(glGetUniformLocation(mcRenderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
     glUniform3fv(glGetUniformLocation(mcRenderProgram, "viewPos"), 1, &main_camera.eye.x);
-    glUniform3f(glGetUniformLocation(mcRenderProgram, "lightDir"), -0.5f, -1.0f, -0.3f);
+    //glUniform3f(glGetUniformLocation(mcRenderProgram, "lightDir"), -0.5f, -1.0f, -0.3f);
+
+    setLightUniforms(mcRenderProgram);
 
     glBindVertexArray(mcVAO);
 
@@ -3226,70 +3721,17 @@ void updateFluidVisualization() {
     glBindVertexArray(0);
 }
 
-// ============================================================================
-// SET VOLUME LIGHT UNIFORMS
-// Helper function to set all light uniforms for the volume shader
-// ============================================================================
-void setVolumeLightUniforms(GLuint program) {
-    glUseProgram(program);
-
-    // Count enabled lights
-    int numPoint = 0, numSpot = 0, numDir = 0;
-
-    // Set directional lights
-    for (int i = 0; i < MAX_DIR_LIGHTS; i++) {
-        std::string base = "dirLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(dirLights[i].direction));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(dirLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), dirLights[i].intensity);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), dirLights[i].enabled ? 1 : 0);
-        if (dirLights[i].enabled) numDir++;
-    }
-
-    // Set point lights from existing shadow-mapped pointLights array
-    for (size_t i = 0; i < pointLights.size() && i < 8; i++) {
-        std::string base = "pointLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(pointLights[i].position));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(pointLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), pointLights[i].intensity);
-        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), 1.0f);
-        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), 0.09f);
-        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), 0.032f);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), pointLights[i].enabled ? 1 : 0);
-        if (pointLights[i].enabled) numPoint++;
-    }
-
-    // Set spot lights
-    for (int i = 0; i < MAX_SPOT_LIGHTS; i++) {
-        std::string base = "spotLights[" + std::to_string(i) + "].";
-        glUniform3fv(glGetUniformLocation(program, (base + "position").c_str()), 1, glm::value_ptr(spotLights[i].position));
-        glUniform3fv(glGetUniformLocation(program, (base + "direction").c_str()), 1, glm::value_ptr(spotLights[i].direction));
-        glUniform3fv(glGetUniformLocation(program, (base + "color").c_str()), 1, glm::value_ptr(spotLights[i].color));
-        glUniform1f(glGetUniformLocation(program, (base + "intensity").c_str()), spotLights[i].intensity);
-        glUniform1f(glGetUniformLocation(program, (base + "cutOff").c_str()), spotLights[i].cutOff);
-        glUniform1f(glGetUniformLocation(program, (base + "outerCutOff").c_str()), spotLights[i].outerCutOff);
-        glUniform1f(glGetUniformLocation(program, (base + "constant").c_str()), spotLights[i].constant);
-        glUniform1f(glGetUniformLocation(program, (base + "linear").c_str()), spotLights[i].linear);
-        glUniform1f(glGetUniformLocation(program, (base + "quadratic").c_str()), spotLights[i].quadratic);
-        glUniform1i(glGetUniformLocation(program, (base + "enabled").c_str()), spotLights[i].enabled ? 1 : 0);
-        if (spotLights[i].enabled) numSpot++;
-    }
-
-    // Set light counts
-    glUniform1i(glGetUniformLocation(program, "numDirLights"), numDir);
-    glUniform1i(glGetUniformLocation(program, "numPointLights"), numPoint);
-    glUniform1i(glGetUniformLocation(program, "numSpotLights"), numSpot);
-}
-
 void draw_fluid_fast() {
     if (!fluidInitialized) return;
 
-    // Update textures from SSBOs
+    // Update textures from SSBOs (still needed for the density data)
     updateFluidTextures();
 
     if (useMarchingCubes) {
         // Run marching cubes on current density field
         runAllMarchingCubesLayers();
+
+        // Draw the generated meshes
         drawMarchingCubesMesh();
     }
     else {
@@ -3300,83 +3742,29 @@ void draw_fluid_fast() {
 
         glUseProgram(volumeRenderProgram);
 
-        // Bind density texture
+        // Bind textures
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_3D, densityTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "densityTex"), 0);
 
-        // Bind temperature texture
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_3D, temperatureTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "temperatureTex"), 1);
 
-        // Bind obstacle texture
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_3D, obstacleTexture);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "obstacleTex"), 2);
 
-        // ====================================================================
-        // BIND SHADOW CUBEMAPS (starting at texture unit 3)
-        // ====================================================================
-        int numLights = std::min((int)pointLights.size(), 8);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "numPointLights"), numLights);
-
-        for (int i = 0; i < numLights; ++i) {
-            // Bind shadow cubemap
-            glActiveTexture(GL_TEXTURE3 + i);
-            glBindTexture(GL_TEXTURE_CUBE_MAP, pointLights[i].depthCubemap);
-            std::string uniformName = "shadowMaps[" + std::to_string(i) + "]";
-            glUniform1i(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()), 3 + i);
-
-            // Pass light position
-            uniformName = "lightPositions[" + std::to_string(i) + "]";
-            glUniform3fv(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
-                1, glm::value_ptr(pointLights[i].position));
-
-            // Pass light intensity
-            uniformName = "lightIntensities[" + std::to_string(i) + "]";
-            glUniform1f(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
-                pointLights[i].intensity);
-
-            // Pass light color
-            uniformName = "lightColors[" + std::to_string(i) + "]";
-            glUniform3fv(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
-                1, glm::value_ptr(pointLights[i].color));
-
-            // Pass far plane
-            uniformName = "lightFarPlanes[" + std::to_string(i) + "]";
-            glUniform1f(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
-                pointLights[i].farPlane);
-
-            // Pass enabled state
-            uniformName = "lightEnabled[" + std::to_string(i) + "]";
-            glUniform1i(glGetUniformLocation(volumeRenderProgram, uniformName.c_str()),
-                pointLights[i].enabled ? 1 : 0);
-        }
-
-        // ====================================================================
-        // SET ADDITIONAL LIGHT UNIFORMS (directional, spot lights)
-        // ====================================================================
-        setVolumeLightUniforms(volumeRenderProgram);
-
-        // ====================================================================
-        // CAMERA AND GRID UNIFORMS
-        // ====================================================================
+        // Camera and grid uniforms
         glm::mat4 viewProj = main_camera.projection_mat * main_camera.view_mat;
         glm::mat4 invViewProj = glm::inverse(viewProj);
 
-        glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"),
-            1, GL_FALSE, &invViewProj[0][0]);
-        glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"),
-            1, &main_camera.eye.x);
-        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"),
-            -x_grid_max, -y_grid_max, -z_grid_max);
-        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"),
-            x_grid_max, y_grid_max, z_grid_max);
-        glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"),
-            x_res, y_res, z_res);
-        glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"),
-            fluidParams.visualizeTemperature ? 1 : 0);
+        glUniformMatrix4fv(glGetUniformLocation(volumeRenderProgram, "invViewProj"), 1, GL_FALSE, &invViewProj[0][0]);
+        glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"), 1, &main_camera.eye.x);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
+        glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
+        glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"), x_res, y_res, z_res);
+        glUniform1i(glGetUniformLocation(volumeRenderProgram, "visualizeTemperature"), fluidParams.visualizeTemperature ? 1 : 0);
 
         // Ray marching parameters
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "densityFactor"), 1.0f);
@@ -3384,9 +3772,7 @@ void draw_fluid_fast() {
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "stepSize"), 0.15f);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "maxSteps"), 256);
 
-        // ====================================================================
-        // VOLUME LIGHTING PARAMETERS (Phase Function Scattering)
-        // ====================================================================
+        // Volume lighting parameters
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeAbsorption"), fluidParams.volumeAbsorption);
         glUniform1f(glGetUniformLocation(volumeRenderProgram, "volumeScattering"), fluidParams.volumeScattering);
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "shadowSamples"), fluidParams.shadowSamples);
@@ -3396,24 +3782,17 @@ void draw_fluid_fast() {
         glUniform1i(glGetUniformLocation(volumeRenderProgram, "enableVolumeLighting"), fluidParams.enableVolumeLighting ? 1 : 0);
         glUniform3f(glGetUniformLocation(volumeRenderProgram, "ambientLight"), 0.15f, 0.15f, 0.2f);
 
-        // Draw fullscreen quad
+        // Set light uniforms (reuse existing function)
+        setLightUniforms(volumeRenderProgram);
+
         glBindVertexArray(fullscreenVAO);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
-
-        // ====================================================================
-        // UNBIND SHADOW MAPS
-        // ====================================================================
-        for (int i = 0; i < numLights; ++i) {
-            glActiveTexture(GL_TEXTURE3 + i);
-            glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
-        }
 
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
     }
 }
-
 
 
 
@@ -3613,55 +3992,16 @@ void draw_triangles_fast(void) {
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "view"), 1, GL_FALSE, glm::value_ptr(main_camera.view_mat));
     glUniformMatrix4fv(glGetUniformLocation(renderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(main_camera.projection_mat));
 
-    // Set camera position for specular
-    glUniform3fv(glGetUniformLocation(renderProgram, "viewPos"), 1, &main_camera.eye.x);
+    // Set light uniforms
+    setLightUniforms(renderProgram);
 
-    // Set ambient light
-    glUniform3f(glGetUniformLocation(renderProgram, "ambientColor"), 1.0f, 1.0f, 1.0f);
-    glUniform1f(glGetUniformLocation(renderProgram, "ambientStrength"), 0.5f);
-
-    // Set point light data
-    int numLights = std::min((int)pointLights.size(), 8);
-    glUniform1i(glGetUniformLocation(renderProgram, "numPointLights"), numLights);
-
-    for (int i = 0; i < numLights; ++i) {
-        std::string prefix = "lightPositions[" + std::to_string(i) + "]";
-        glUniform3fv(glGetUniformLocation(renderProgram, prefix.c_str()), 1, glm::value_ptr(pointLights[i].position));
-
-        prefix = "lightIntensities[" + std::to_string(i) + "]";
-        glUniform1f(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].intensity);
-
-        prefix = "lightColors[" + std::to_string(i) + "]";
-        glUniform3fv(glGetUniformLocation(renderProgram, prefix.c_str()), 1, glm::value_ptr(pointLights[i].color));
-
-        prefix = "lightFarPlanes[" + std::to_string(i) + "]";
-        glUniform1f(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].farPlane);
-
-        // NEW: Pass enabled state (as int: 1 or 0)
-        prefix = "lightEnabled[" + std::to_string(i) + "]";
-        glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()), pointLights[i].enabled ? 1 : 0);
-
-        // Bind shadow cubemap
-        glActiveTexture(GL_TEXTURE0 + i);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, pointLights[i].depthCubemap);
-        prefix = "shadowMaps[" + std::to_string(i) + "]";
-        glUniform1i(glGetUniformLocation(renderProgram, prefix.c_str()), i);
-    }
-
-
+    // Set shadow uniforms
+    setShadowUniforms(renderProgram);
 
     glBindVertexArray(triangleVAO);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(numTriangleIndices), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
-
-    // Unbind shadow maps
-    for (int i = 0; i < numLights; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
-    }
 }
-
-
 
 
 void draw_points_fast() {
@@ -3850,23 +4190,23 @@ void reshape_func(int width, int height)
 
     main_camera.calculate_camera_matrices(win_x, win_y);
 
-    if (textRenderer)
-        textRenderer->setProjection(win_x, win_y);
+    if(textRenderer)
+   textRenderer->setProjection(win_x, win_y);
 }
 
 void draw_objects(void)
 {
+    // === SHADOW PASS: Render shadow maps first ===
     renderShadowMaps();
 
-    // Draw surface points (voxel boundaries)
-  //  draw_points_fast();
+    // === REGULAR RENDER PASS ===
 
-    // Draw triangles (voxel mesh)
+    // Draw triangles (voxel mesh) - WITH shadows
     if (draw_triangles_on_screen) {
         draw_triangles_fast();
     }
 
-    // Draw fluid
+    // Draw fluid - WITHOUT shadows (as specified)
     if (fluidSimEnabled) {
         draw_fluid_fast();
     }
@@ -3909,21 +4249,7 @@ void idle_func(void) {
             mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
             addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
             lastMouseWorldPos = currentMouseWorldPos;
-
-            if (pointLights.size() < 2)
-                addPointLight(currentMouseWorldPos, 500.0, glm::vec3(1.0, 0.0, 0.0));
-            else
-            {
-                pointLights[1].position = currentMouseWorldPos;
-                pointLights[1].enabled = false;
-            }
         }
-        else
-        {
-            if (pointLights.size() == 2)
-                pointLights[1].enabled = false;
-        }
-
 
         // Detect fluid-obstacle collisions
         static const int COLLISION_INTERVAL_MS = 100;
@@ -3959,6 +4285,17 @@ void keyboard_func(unsigned char key, int x, int y)
 {
     switch (tolower(key))
     {
+
+    case ';':
+        fluidParams.shadowDensityScale = glm::max(0.5f, fluidParams.shadowDensityScale - 0.5f);
+        cout << "Shadow density scale: " << fluidParams.shadowDensityScale << endl;
+        break;
+
+    case '\'':
+        fluidParams.shadowDensityScale = glm::min(20.0f, fluidParams.shadowDensityScale + 0.5f);
+        cout << "Shadow density scale: " << fluidParams.shadowDensityScale << endl;
+        break;
+
     case 'i':  // Toggle between marching cubes and ray marching
         useMarchingCubes = !useMarchingCubes;
         cout << "Rendering mode: " << (useMarchingCubes ? "Marching Cubes" : "Ray Marching") << endl;
@@ -3986,180 +4323,56 @@ void keyboard_func(unsigned char key, int x, int y)
         cout << "Fluid simulation: " << (fluidSimEnabled ? "ON" : "OFF") << endl;
         break;
 
-        // Reset fluid
-    //case 'c':
-    //    if (fluidInitialized) {
-    //        size_t gridSize = x_res * y_res * z_res;
-    //        vector<float> zeroDensity(gridSize, 0.0f);
-    //        vector<float> ambientTemp(gridSize, fluidParams.ambientTemperature);
-    //        vector<glm::vec4> zeroVelocity(gridSize, glm::vec4(0.0f));
-
-    //        for (int i = 0; i < 2; i++) {
-    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, densitySSBO[i]);
-    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), zeroDensity.data());
-
-    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, velocitySSBO[i]);
-    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(glm::vec4), zeroVelocity.data());
-
-    //            // Reset temperature to ambient
-    //            glBindBuffer(GL_SHADER_STORAGE_BUFFER, temperatureSSBO[i]);
-    //            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(float), ambientTemp.data());
-    //        }
-
-    //        // Reset blackening state
-    //        if (!vo.voxel_original_colours.empty()) {
-    //            vo.voxel_colours = vo.voxel_original_colours;
-    //            fill(vo.voxel_blacken_times.begin(), vo.voxel_blacken_times.end(), -1.0f);
-    //            vo.tri_vec.clear();
-    //            get_triangles(vo.tri_vec, vo);
-    //            updateTriangleBuffer(vo);
-    //        }
-
-    //        simulationStartTime = std::chrono::steady_clock::now();  // Reset clock
-
-    //        cout << "Fluid reset (including temperature and blackening)" << endl;
-    //    }
-    //    break;
-
-        // Adjust viscosity
-    case '[':
-        fluidParams.viscosity *= 0.5f;
-        cout << "Viscosity: " << fluidParams.viscosity << endl;
-        break;
-    case ']':
-        fluidParams.viscosity *= 2.0f;
-        cout << "Viscosity: " << fluidParams.viscosity << endl;
-        break;
-
-        // Adjust injection radius
-    case ',':
-        injectRadius = std::max(1, injectRadius - 1);
-        cout << "Injection radius: " << injectRadius << endl;
-        break;
-    case '.':
-        injectRadius = std::min(10, injectRadius + 1);
-        cout << "Injection radius: " << injectRadius << endl;
-        break;
-
-        // ========================================
-        // NEW: Temperature and Buoyancy Controls
-        // ========================================
-
-        // Toggle gravity
-    case 'g':
-        fluidParams.enableGravity = !fluidParams.enableGravity;
-        cout << "Gravity: " << (fluidParams.enableGravity ? "ON" : "OFF") << endl;
-        break;
-
-        // Toggle buoyancy
-    case 'y':
-        fluidParams.enableBuoyancy = !fluidParams.enableBuoyancy;
-        cout << "Buoyancy: " << (fluidParams.enableBuoyancy ? "ON" : "OFF") << endl;
-        break;
-
-        // Toggle temperature visualization
-    case 'v':
-        fluidParams.visualizeTemperature = !fluidParams.visualizeTemperature;
-        cout << "Visualize temperature: " << (fluidParams.visualizeTemperature ? "ON" : "OFF") << endl;
-        break;
-
-        // Adjust buoyancy alpha (density sinking)
-    case '1':
-        fluidParams.buoyancyAlpha = std::max(0.0f, fluidParams.buoyancyAlpha - 0.01f);
-        cout << "Buoyancy Alpha (density): " << fluidParams.buoyancyAlpha << endl;
-        break;
-    case '2':
-        fluidParams.buoyancyAlpha = std::min(1.0f, fluidParams.buoyancyAlpha + 0.01f);
-        cout << "Buoyancy Alpha (density): " << fluidParams.buoyancyAlpha << endl;
-        break;
-
-        // Adjust buoyancy beta (temperature rising)
-    case '3':
-        fluidParams.buoyancyBeta = std::max(0.0f, fluidParams.buoyancyBeta - 0.1f);
-        cout << "Buoyancy Beta (temperature): " << fluidParams.buoyancyBeta << endl;
-        break;
-    case '4':
-        fluidParams.buoyancyBeta = std::min(5.0f, fluidParams.buoyancyBeta + 0.1f);
-        cout << "Buoyancy Beta (temperature): " << fluidParams.buoyancyBeta << endl;
-        break;
-
-        // Adjust temperature amount
-    case '5':
-        fluidParams.temperatureAmount = std::max(0.0f, fluidParams.temperatureAmount - 1.0f);
-        cout << "Temperature injection amount: " << fluidParams.temperatureAmount << endl;
-        break;
-    case '6':
-        fluidParams.temperatureAmount = std::min(50.0f, fluidParams.temperatureAmount + 1.0f);
-        cout << "Temperature injection amount: " << fluidParams.temperatureAmount << endl;
-        break;
-
-        // Adjust gravity strength
-    case '7':
-        fluidParams.gravity = std::max(0.0f, fluidParams.gravity - 1.0f);
-        cout << "Gravity: " << fluidParams.gravity << endl;
-        break;
-    case '8':
-        fluidParams.gravity = std::min(50.0f, fluidParams.gravity + 1.0f);
-        cout << "Gravity: " << fluidParams.gravity << endl;
-        break;
-
-        // ====================================================================
-        // VOLUME LIGHTING CONTROLS
-        // ====================================================================
-    case '9':
-        fluidParams.phaseG = std::max(-0.99f, fluidParams.phaseG - 0.1f);
-        cout << "Phase G (scattering): " << fluidParams.phaseG << " (negative = back scatter)" << endl;
-        break;
-    case '0':
-        fluidParams.phaseG = std::min(0.99f, fluidParams.phaseG + 0.1f);
-        cout << "Phase G (scattering): " << fluidParams.phaseG << " (positive = forward scatter)" << endl;
-        break;
+ 
     case 'l':
-    case 'L':
         fluidParams.enableVolumeLighting = !fluidParams.enableVolumeLighting;
         cout << "Volume lighting: " << (fluidParams.enableVolumeLighting ? "ON" : "OFF") << endl;
         break;
-    case 'k':
-    case 'K':
+
+    case 'o':
         fluidParams.enableVolumeShadows = !fluidParams.enableVolumeShadows;
         cout << "Volume shadows: " << (fluidParams.enableVolumeShadows ? "ON" : "OFF") << endl;
         break;
-    case 'j':
-    case 'J':
-        fluidParams.volumeScattering = std::max(0.0f, fluidParams.volumeScattering - 0.1f);
-        cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
-        break;
-    case 'u':
-    case 'U':
-        fluidParams.volumeScattering = std::min(2.0f, fluidParams.volumeScattering + 0.1f);
+
+    case '[':
+        fluidParams.volumeScattering = glm::max(0.0f, fluidParams.volumeScattering - 0.1f);
         cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
         break;
 
-    case 'o':
-    {
-        // Assuming you want to operate on a specifi c voxel object, e.g., voxel_objects[0]
-        voxel_object& vo = voxel_objects[0];  // or whichever object you want to transform
-
-        vo.u += 0.1f;
-        vo.model_matrix = glm::mat4(1.0f);
-
-        vo.model_matrix = glm::translate(vo.model_matrix, voxelFiles[0].location);
-
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-        get_background_points_GPU(voxel_objects);
-        updateTriangleBuffer(voxel_objects);
-
-        //        updateSurfacePointsForRendering(vo);
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float, std::milli> elapsed = end - start;
-        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-
-
+    case ']':
+        fluidParams.volumeScattering = glm::min(1.0f, fluidParams.volumeScattering + 0.1f);
+        cout << "Volume scattering: " << fluidParams.volumeScattering << endl;
         break;
-    }
+
+
+
+//
+//    case 'o':
+//    {
+//        // Assuming you want to operate on a specifi c voxel object, e.g., voxel_objects[0]
+//        voxel_object& vo = voxel_objects[0];  // or whichever object you want to transform
+//
+//        vo.u += 0.1f;
+//        vo.model_matrix = glm::mat4(1.0f);
+//
+//        vo.model_matrix = glm::translate(vo.model_matrix, voxelFiles[0].location);
+//
+//        vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
+//        vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
+//
+//        std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+//        get_background_points_GPU(voxel_objects);
+//        updateTriangleBuffer(voxel_objects);
+//
+////        updateSurfacePointsForRendering(vo);
+//        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+//        std::chrono::duration<float, std::milli> elapsed = end - start;
+//        cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
+//
+//
+//        break;
+//    }
+//
 
 
 
@@ -4168,114 +4381,6 @@ void keyboard_func(unsigned char key, int x, int y)
 
 
 
-
-
-
-
-
-    //case 'o':
-    //{
-    //    vo.u += 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-    //case 'p':
-    //{
-    //    vo.u -= 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-    //case 'k':
-    //{
-    //    vo.v += 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-    //case 'l':
-    //{
-    //    vo.v -= 0.1f;
-    //    vo.model_matrix = glm::mat4(1.0f);
-    //    vo.model_matrix = glm::translate(vo.model_matrix, knight_location);
-
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.u, glm::vec3(0.0f, 1.0f, 0.0f));
-    //    vo.model_matrix = glm::rotate(vo.model_matrix, vo.v, glm::vec3(1.0f, 0.0f, 0.0f));
-
-    //    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-    //    get_background_points_GPU(vo);
-    //    glFinish();
-    //    updateSurfacePointsForRendering(vo);
-    //    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
-    //    std::chrono::duration<float, std::milli> elapsed = end - start;
-    //    cout << "GPU compute time: " << elapsed.count() << " ms" << endl;
-    //    break;
-    //}
-
-
-
-    // Print controls
-    case 'h':
-        cout << "\n=== CONTROLS ===" << endl;
-        cout << "F: Toggle fluid simulation" << endl;
-        cout << "C: Clear/reset fluid" << endl;
-        cout << "Middle Mouse + Drag: Inject density and velocity" << endl;
-        cout << "Shift + Middle Mouse: Inject density only" << endl;
-        cout << "[/]: Decrease/increase viscosity" << endl;
-        cout << "-/=: Decrease/increase turbulence (Smagorinsky constant)" << endl;
-        cout << ",/.: Decrease/increase injection radius" << endl;
-        cout << "\n=== NEW: TEMPERATURE & BUOYANCY ===" << endl;
-        cout << "G: Toggle gravity" << endl;
-        cout << "Y: Toggle buoyancy" << endl;
-        cout << "V: Toggle temperature visualization" << endl;
-        cout << "1/2: Decrease/increase buoyancy alpha (density sinking)" << endl;
-        cout << "3/4: Decrease/increase buoyancy beta (temperature rising)" << endl;
-        cout << "5/6: Decrease/increase temperature injection" << endl;
-        cout << "7/8: Decrease/increase gravity strength" << endl;
-        cout << "\n=== OTHER ===" << endl;
-        cout << "O/P: Rotate voxel object Y-axis" << endl;
-        cout << "K/L: Rotate voxel object X-axis" << endl;
-        cout << "T: Toggle triangle mesh" << endl;
-        cout << "W: Toggle axes" << endl;
-        cout << "R: Toggle real-time rotation" << endl;
-        cout << "M: Take screenshot" << endl;
-        cout << "H: Show this help" << endl;
-        cout << "================\n" << endl;
-        break;
 
     default:
         break;
@@ -4406,7 +4511,6 @@ void cleanup(void)
 
     cleanupShadowMaps();
 
-
     glutDestroyWindow(win_id);
 }
 
@@ -4463,6 +4567,10 @@ int main(int argc, char** argv)
     // Initialize GPU buffers for all voxel objects
     initGPUBuffers(voxel_objects);
 
+
+
+
+
     // Initial GPU computation for all objects
     std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
     get_background_points_GPU(voxel_objects);
@@ -4481,13 +4589,15 @@ int main(int argc, char** argv)
     // Initialize fluid simulation
     initFluidSimulation();
 
-    initShadowMaps();
-
-    // Initialize default lights for volume rendering
-    initDefaultLights();
-
     // Update obstacles from voxel collisions
     updateFluidObstacles();
+
+
+    initDefaultLights();
+
+    initShadowMaps();
+
+
 
     // Print controls
     cout << "\n=== FLUID SIMULATION WITH TEMPERATURE, BUOYANCY & GRAVITY ===" << endl;
@@ -4506,10 +4616,6 @@ int main(int argc, char** argv)
     cout << "3/4: Adjust buoyancy beta (temperature)" << endl;
     cout << "5/6: Adjust temperature injection amount" << endl;
     cout << "7/8: Adjust gravity strength" << endl;
-    cout << "\n--- Volume Lighting Controls ---" << endl;
-    cout << "9/0: Adjust phase function (scattering direction)" << endl;
-    cout << "L: Toggle volume lighting" << endl;
-    cout << "K: Toggle volume shadows" << endl;
     cout << "\nH: Show all controls" << endl;
     cout << "=================================\n" << endl;
 
