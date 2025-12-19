@@ -1897,15 +1897,18 @@ void main()
                     float dist = length(toLight);
                     vec3 lightDir = toLight / dist;
                     
-                    // Attenuation (inverse square)
-                    float attenuation = lightIntensities[p] / (dist * dist + 1.0);
+                    // Attenuation -- fake the distance using a custom attenuation
+                    // This makes smoke highlights noticeable
+                    float attenuation = lightIntensities[p] / (pow(dist, 1.65));
                     
                     // Shadow from solid geometry (shadow cubemaps)
                     float solidShadow = sampleVolumeShadow(p, pos);
                     
                     // Volumetric self-shadowing (light marching through smoke)
-                    float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
-                    
+                    //float volumeShadow = marchLightShadow(pos, lightDir, dist, shadowSamples);
+                    float maxMarchDist = min(dist, distToBoundary(pos, lightDir));
+float volumeShadow = marchLightShadow(pos, lightDir, maxMarchDist, shadowSamples);
+
                     // Combined shadow factor
                     float shadow = solidShadow * volumeShadow;
                     
