@@ -2044,8 +2044,8 @@ uniform vec3 ambientColor;
 uniform float ambientStrength;
 
 // Shadow bias to prevent acne
-const float SHADOW_BIAS = 0.05;
-const float MAX_SHADOW_BIAS = 0.1;
+const float SHADOW_BIAS = 0.0125;
+const float MAX_SHADOW_BIAS = 0.25;
 
 // Sample shadow cubemap with PCF (Percentage Closer Filtering)
 float calculateShadow(int lightIndex, vec3 fragToLight, float currentDepth, float farPlane) {
