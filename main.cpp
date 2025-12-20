@@ -2604,7 +2604,7 @@ void stepFluidSimulation() {
     GLuint groupsY = (y_res + 7) / 8;
     GLuint groupsZ = (z_res + 7) / 8;
 
-    glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
+    glm::vec3 bgGridMin(0, 0, 0);
     glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
 
     int src = currentBuffer;
@@ -2799,7 +2799,7 @@ void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool a
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, temperatureSSBO[0]);
 
-    glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
+    glm::vec3 bgGridMin(0,0, 0);
     glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
 
     glUniform3i(glGetUniformLocation(addSourceProgram, "gridRes"), x_res, y_res, z_res);
@@ -2934,7 +2934,7 @@ void runMarchingCubes(float isoValue, int layerIndex) {
 
     // Set uniforms
     glUniform3i(glGetUniformLocation(mcComputeProgram, "gridRes"), x_res, y_res, z_res);
-    glUniform3f(glGetUniformLocation(mcComputeProgram, "gridMin"), -x_grid_max, -y_grid_max, -z_grid_max);
+    glUniform3f(glGetUniformLocation(mcComputeProgram, "gridMin"), 0, 0, 0);
     glUniform3f(glGetUniformLocation(mcComputeProgram, "gridMax"), x_grid_max, y_grid_max, z_grid_max);
     glUniform1f(glGetUniformLocation(mcComputeProgram, "isoValue"), isoValue);
     glUniform1ui(glGetUniformLocation(mcComputeProgram, "maxVertices"), MC_MAX_VERTICES);
@@ -3091,9 +3091,9 @@ void updateFluidVisualization() {
     vector<RenderVertex> fluidVertices;
     fluidVertices.reserve(gridSize / 10);
 
-    float x_grid_min = -x_grid_max;
-    float y_grid_min = -y_grid_max;
-    float z_grid_min = -z_grid_max;
+    float x_grid_min = 0;
+    float y_grid_min = 0;
+    float z_grid_min = 0;
 
     float x_step = (x_grid_max - x_grid_min) / (x_res - 1);
     float y_step = (y_grid_max - y_grid_min) / (y_res - 1);
@@ -3249,7 +3249,7 @@ void draw_fluid_fast() {
         glUniform3fv(glGetUniformLocation(volumeRenderProgram, "cameraPos"),
             1, &main_camera.eye.x);
         glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMin"),
-            -x_grid_max, -y_grid_max, -z_grid_max);
+            0, 0, 9);
         glUniform3f(glGetUniformLocation(volumeRenderProgram, "gridMax"),
             x_grid_max, y_grid_max, z_grid_max);
         glUniform3i(glGetUniformLocation(volumeRenderProgram, "gridRes"),
@@ -3354,7 +3354,7 @@ void get_background_points_GPU(std::vector<voxel_object>& objects) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, backgroundCollisionsSSBO);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gridSize * sizeof(int), negOneCollisions.data());
 
-    glm::vec3 bgGridMin(-x_grid_max, -y_grid_max, -z_grid_max);
+    glm::vec3 bgGridMin(0, 0, 0);
     glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
 
     GLuint groupsX = (x_res + 7) / 8;
@@ -3438,9 +3438,9 @@ void updateSurfacePointsForRendering(voxel_object& v) {
     vector<RenderVertex> surfaceVertices;
     surfaceVertices.reserve(gridSize / 10); // Estimate
 
-    float x_grid_min = -x_grid_max;
-    float y_grid_min = -y_grid_max;
-    float z_grid_min = -z_grid_max;
+    float x_grid_min = 0;
+    float y_grid_min = 0;
+    float z_grid_min = 0;
 
     float x_step = (x_grid_max - x_grid_min) / (x_res - 1);
     float y_step = (y_grid_max - y_grid_min) / (y_res - 1);

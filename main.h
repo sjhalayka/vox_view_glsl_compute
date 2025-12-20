@@ -106,8 +106,8 @@ struct VoxelFileInfo {
 // List of voxel files to load with their locations
 // Add or remove entries here to change which voxel files are loaded
 std::vector<VoxelFileInfo> voxelFiles = {
-	{ "chr_knight.vox", glm::vec3(5, 0, 0) },
-	{ "chr_cat.vox", glm::vec3(-5, 0, 0) }
+	{ "chr_knight.vox", glm::vec3(100, 0, 0) },
+	{ "chr_cat.vox", glm::vec3(50, 0, 0) }
 };
 
 // Per-object GPU buffer handles
