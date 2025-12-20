@@ -3302,6 +3302,57 @@ void draw_fluid_fast() {
 // Mouse Ray Casting for 3D Position
 // ============================================================================
 
+
+
+
+
+
+
+glm::vec3 screenToWorld_ortho(int mouseX, int mouseY, float depth) {
+    // Convert screen coordinates to normalized device coordinates
+    float ndcX = (2.0f * mouseX) / win_x - 1.0f;
+    float ndcY = 1.0f - (2.0f * mouseY) / win_y;
+
+    // For orthographic projection, we unproject two points at different depths
+    // to get the ray origin and direction
+    glm::mat4 invViewProj = glm::inverse(main_camera.projection_mat * main_camera.view_mat);
+
+    // Unproject point on near plane (z = -1 in NDC)
+    glm::vec4 nearPoint = invViewProj * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
+    nearPoint /= nearPoint.w;
+
+    // Unproject point on far plane (z = 1 in NDC)
+    glm::vec4 farPoint = invViewProj * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+    farPoint /= farPoint.w;
+
+    // Ray origin and direction (for ortho, rays are parallel)
+    glm::vec3 rayOrigin = glm::vec3(nearPoint);
+    glm::vec3 rayDir = glm::normalize(glm::vec3(farPoint) - glm::vec3(nearPoint));
+
+    // Try to intersect with the Y=0 plane (ground plane)
+    if (std::abs(rayDir.y) > 0.001f) {
+        float t = -rayOrigin.y / rayDir.y;
+        if (t > 0) {
+            return rayOrigin + rayDir * t;
+        }
+    }
+
+    // If Y=0 intersection fails, try Z = z_grid_max/2 plane (middle of grid depth)
+    float targetZ = z_grid_max / 2.0f;
+    if (std::abs(rayDir.z) > 0.001f) {
+        float t = (targetZ - rayOrigin.z) / rayDir.z;
+        if (t > 0) {
+            return rayOrigin + rayDir * t;
+        }
+    }
+
+    // Fallback: use a point along the ray at a reasonable distance
+    return rayOrigin + rayDir * 50.0f;
+}
+
+
+
+
 glm::vec3 screenToWorld(int mouseX, int mouseY, float depth) {
     // Convert screen coordinates to normalized device coordinates
     float x = (2.0f * mouseX) / win_x - 1.0f;
@@ -3823,6 +3874,8 @@ void idle_func(void) {
             addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
             lastMouseWorldPos = currentMouseWorldPos;
 
+            currentMouseWorldPos.z = z_grid_max / 2.0;
+
             // Use a fixed secondary light slot instead of creating new lights
             if (pointLights.size() >= 2) {
                 // Reuse existing light at index 1
@@ -4218,7 +4271,7 @@ void mouse_func(int button, int state, int x, int y)
                 injectDensity = true;
                 injectVelocity = true;
             }
-            currentMouseWorldPos = screenToWorld(x, y, 0.0f);
+            currentMouseWorldPos = screenToWorld_ortho(x, y, 0.0f);
             lastMouseWorldPos = currentMouseWorldPos;
         }
         else {
@@ -4253,7 +4306,7 @@ void motion_func(int x, int y)
     }
     else if (mmb_down) {
         // Update mouse world position for fluid injection
-        currentMouseWorldPos = screenToWorld(x, y, 0.0f);
+        currentMouseWorldPos = screenToWorld_ortho(x, y, 0.0f);
     }
 
     main_camera.calculate_camera_matrices(win_x, win_y);
