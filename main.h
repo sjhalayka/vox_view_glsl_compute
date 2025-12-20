@@ -278,7 +278,7 @@ bool injectVelocity = false;
 glm::vec3 lastMouseWorldPos(0.0f);
 glm::vec3 currentMouseWorldPos(0.0f);
 glm::vec3 mouseVelocity(0.0f);
-int injectRadius = 3;
+int injectRadius = 1;
 
 // Fluid visualization
 GLuint fluidVAO = 0, fluidVBO = 0;
