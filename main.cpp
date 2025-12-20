@@ -2260,7 +2260,6 @@ void initShadowMaps() {
         return;
     }
 
-    initDefaultLights();
 
     cout << "Shadow maps initialized with " << pointLights.size() << " point light(s)" << endl;
 }
@@ -2334,11 +2333,11 @@ void cleanupShadowMaps() {
         shadowMapProgram = 0;
     }
 
-    for (auto& light : pointLights) {
-        if (light.shadowFBO) glDeleteFramebuffers(1, &light.shadowFBO);
-        if (light.depthCubemap) glDeleteTextures(1, &light.depthCubemap);
-    }
-    pointLights.clear();
+    //for (auto& light : pointLights) {
+    //    if (light.shadowFBO) glDeleteFramebuffers(1, &light.shadowFBO);
+    //    if (light.depthCubemap) glDeleteTextures(1, &light.depthCubemap);
+    //}
+    //pointLights.clear();
 }
 
 
@@ -3737,27 +3736,27 @@ void reshape_func(int width, int height)
     if (textRenderer)
         textRenderer->setProjection(win_x, win_y);
 
-    // Save light positions/settings before cleanup
-    std::vector<glm::vec3> savedPositions;
-    std::vector<float> savedIntensities;
-    std::vector<glm::vec3> savedColors;
-    std::vector<bool> savedEnabled;
+    //// Save light positions/settings before cleanup
+    //std::vector<glm::vec3> savedPositions;
+    //std::vector<float> savedIntensities;
+    //std::vector<glm::vec3> savedColors;
+    //std::vector<bool> savedEnabled;
 
-    for (const auto& light : pointLights) {
-        savedPositions.push_back(light.position);
-        savedIntensities.push_back(light.intensity);
-        savedColors.push_back(light.color);
-        savedEnabled.push_back(light.enabled);
-    }
+    //for (const auto& light : pointLights) {
+    //    savedPositions.push_back(light.position);
+    //    savedIntensities.push_back(light.intensity);
+    //    savedColors.push_back(light.color);
+    //    savedEnabled.push_back(light.enabled);
+    //}
 
     cleanupShadowMaps();
     initShadowMaps();
 
-    // Restore additional lights if there were more than 1
-    for (size_t i = 1; i < savedPositions.size() && i < MAX_POINT_LIGHTS; i++) {
-        addPointLight(savedPositions[i], savedIntensities[i], savedColors[i]);
-        pointLights.back().enabled = savedEnabled[i];
-    }
+    //// Restore additional lights if there were more than 1
+    //for (size_t i = 0; i < savedPositions.size() && i < MAX_POINT_LIGHTS; i++) {
+    //    addPointLight(savedPositions[i], savedIntensities[i], savedColors[i]);
+    //    pointLights.back().enabled = savedEnabled[i];
+    //}
 
 }
 
@@ -3827,7 +3826,7 @@ void idle_func(void) {
             // Use a fixed secondary light slot instead of creating new lights
             if (pointLights.size() >= 2) {
                 // Reuse existing light at index 1
-                pointLights[1].position = currentMouseWorldPos + glm::vec3(0, 0, 0);
+                pointLights[1].position = currentMouseWorldPos;
                 pointLights[1].enabled = true;
             }
             // Note: Don't create new lights during runtime - manage them at init
@@ -4398,6 +4397,8 @@ int main(int argc, char** argv)
     initFluidSimulation();
 
     initShadowMaps();
+
+    initDefaultLights();
 
     // Update obstacles from voxel collisions
     updateFluidObstacles();
