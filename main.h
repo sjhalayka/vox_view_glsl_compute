@@ -84,13 +84,13 @@ int mouse_y = 0;
 
 
 
-const size_t x_res = 128;
-const size_t y_res = 128;
-const size_t z_res = 128;
+const size_t x_res = 192;
+const size_t y_res = 108;
+const size_t z_res = 100;
 
-const float x_grid_max = 10;
-const float y_grid_max = 10;
-const float z_grid_max = 10;
+const float x_grid_max = 192;
+const float y_grid_max = 108;
+const float z_grid_max = 100;
 
 
 // ============================================================================

@@ -53,18 +53,22 @@ void uv_camera::transform(void)
 
 	if (win_y > 0)
 	{
-		projection_mat = perspective(
-			glm::radians(fov),
-			float(win_x) / float(win_y),
-			near_plane,
-			far_plane
-		);
+		//projection_mat = perspective(
+		//	glm::radians(fov),
+		//	float(win_x) / float(win_y),
+		//	near_plane,
+		//	far_plane
+		//);
+
+		projection_mat = glm::ortho(0.0f, (float)win_x / 10.0f,
+			0.0f, (float)win_y / 10.0f,
+			0.0001f, 10000.0f);
 	}
 
 	view_mat = glm::lookAt(
-		eye,
-		look_at,
-		up
+		vec3(0, 0, 200),
+		vec3(0, 0, 0),
+		vec3(0, 1, 0)
 	);
 }
 
