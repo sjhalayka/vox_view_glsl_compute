@@ -866,7 +866,14 @@ float sampleField(vec3 pos) {
     
     // Convert world position to grid coordinates
     vec3 gridPos = (pos - gridMin) / cellSize;
-    gridPos = clamp(gridPos, vec3(0.5), gridSize - vec3(1.5));
+    
+    // Return 0 for positions outside the grid (prevents boundary feedback loop)
+    if (any(lessThan(gridPos, vec3(0.0))) || any(greaterThanEqual(gridPos, gridSize))) {
+        return 0.0;
+    }
+    
+    // Safe clamping for interpolation
+    gridPos = clamp(gridPos, vec3(0.0), gridSize - vec3(1.001));
     
     ivec3 i0 = ivec3(floor(gridPos));
     ivec3 i1 = i0 + ivec3(1);
@@ -961,7 +968,14 @@ vec3 sampleVelocity(vec3 pos) {
     vec3 cellSize = (gridMax - gridMin) / (gridSize - 1.0);
     
     vec3 gridPos = (pos - gridMin) / cellSize;
-    gridPos = clamp(gridPos, vec3(0.5), gridSize - vec3(1.5));
+    
+    // Return zero velocity for positions outside the grid (prevents boundary feedback loop)
+    if (any(lessThan(gridPos, vec3(0.0))) || any(greaterThanEqual(gridPos, gridSize))) {
+        return vec3(0.0);
+    }
+    
+    // Safe clamping for interpolation
+    gridPos = clamp(gridPos, vec3(0.0), gridSize - vec3(1.001));            
     
     ivec3 i0 = ivec3(floor(gridPos));
     ivec3 i1 = i0 + ivec3(1);
@@ -1607,15 +1621,15 @@ void main() {
     // Domain boundary conditions (closed box)
     vec3 vel = velocity[index].xyz;
     
-    //// X boundaries
+    ////// X boundaries
     //if (gid.x == 0) vel.x = max(vel.x, 0.0);
     //if (gid.x == gridRes.x - 1) vel.x = min(vel.x, 0.0);
     //
-    //// Y boundaries
-    //if (gid.y == 0) vel.y = max(vel.y, 0.0);
+    ////// y boundaries
+    if (gid.y == 0) vel.y = max(vel.y, 0.0);
     //if (gid.y == gridRes.y - 1) vel.y = min(vel.y, 0.0);
     //
-    //// Z boundaries
+    ////// z boundaries
     //if (gid.z == 0) vel.z = max(vel.z, 0.0);
     //if (gid.z == gridRes.z - 1) vel.z = min(vel.z, 0.0);
     
@@ -2799,7 +2813,7 @@ void addFluidSource(const glm::vec3& position, const glm::vec3& velocity, bool a
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, obstacleSSBO);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, temperatureSSBO[0]);
 
-    glm::vec3 bgGridMin(0,0, 0);
+    glm::vec3 bgGridMin(0, 0, 0);
     glm::vec3 bgGridMax(x_grid_max, y_grid_max, z_grid_max);
 
     glUniform3i(glGetUniformLocation(addSourceProgram, "gridRes"), x_res, y_res, z_res);
@@ -3868,11 +3882,33 @@ void idle_func(void) {
         for (size_t i = 0; i < pointLights.size(); i++)
             if (pointLights[i].enabled)
                 enabled_count++;
-
         if (injectDensity || injectVelocity) {
             mouseVelocity = (currentMouseWorldPos - lastMouseWorldPos) * 10.0f;
-            addFluidSource(currentMouseWorldPos, mouseVelocity, injectDensity, injectVelocity);
+
+            // Clamp injection position away from boundaries by source radius
+            float sourceRadius = (x_grid_max * 2.0f / x_res) * injectRadius;
+            glm::vec3 clampedSourcePos = currentMouseWorldPos;
+            clampedSourcePos.x = glm::clamp(clampedSourcePos.x, sourceRadius, x_grid_max - sourceRadius);
+            clampedSourcePos.y = glm::clamp(clampedSourcePos.y, sourceRadius, y_grid_max - sourceRadius);
+            clampedSourcePos.z = glm::clamp(clampedSourcePos.z, sourceRadius, z_grid_max - sourceRadius);
+
+            addFluidSource(clampedSourcePos, mouseVelocity, injectDensity, injectVelocity);
+
+
+
             lastMouseWorldPos = currentMouseWorldPos;
+
+
+            if (currentMouseWorldPos.x < 0)
+                currentMouseWorldPos.x = 0;
+            else if (currentMouseWorldPos.x > x_grid_max)
+                currentMouseWorldPos.x = x_grid_max;
+
+            if (currentMouseWorldPos.y < 0)
+                currentMouseWorldPos.y = 0;
+            else if (currentMouseWorldPos.y > y_grid_max)
+                currentMouseWorldPos.y = y_grid_max;
+
 
             currentMouseWorldPos.z = z_grid_max / 2.0;
 
@@ -3882,6 +3918,7 @@ void idle_func(void) {
                 pointLights[1].position = currentMouseWorldPos;
                 pointLights[1].enabled = true;
             }
+
             // Note: Don't create new lights during runtime - manage them at init
         }
         else
